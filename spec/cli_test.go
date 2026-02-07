@@ -139,6 +139,37 @@ func TestInitBunProject(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test: init — uv project detection
+// ---------------------------------------------------------------------------
+
+func TestInitUvProject(t *testing.T) {
+	t.Parallel()
+	_ = orchestratorBinary(t)
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(""), 0644)
+
+	_, _, code := runBinary(t, dir, "init")
+	if code != 0 {
+		t.Fatalf("init exited %d", code)
+	}
+
+	cfgData, err := os.ReadFile(filepath.Join(dir, "slot-machine.json"))
+	if err != nil {
+		t.Fatalf("reading generated config: %v", err)
+	}
+	var cfg map[string]any
+	json.Unmarshal(cfgData, &cfg)
+
+	if cfg["setup_command"] != "uv sync --frozen" {
+		t.Fatalf("expected uv setup_command, got: %v", cfg["setup_command"])
+	}
+	if cfg["start_command"] != "uv run python app.py" {
+		t.Fatalf("expected uv start_command, got: %v", cfg["start_command"])
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test: init — appends .slot-machine to .gitignore (idempotent)
 // ---------------------------------------------------------------------------
 

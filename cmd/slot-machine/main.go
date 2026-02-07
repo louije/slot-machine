@@ -873,9 +873,9 @@ func cmdInit() {
 	case fileExists(filepath.Join(cwd, "package-lock.json")):
 		cfg.SetupCommand = "npm ci"
 		cfg.StartCommand = readStartScript(cwd, "node")
-	case fileExists(filepath.Join(cwd, "requirements.txt")):
-		cfg.SetupCommand = "pip install -r requirements.txt"
-		cfg.StartCommand = "python app.py"
+	case fileExists(filepath.Join(cwd, "uv.lock")):
+		cfg.SetupCommand = "uv sync --frozen"
+		cfg.StartCommand = "uv run python app.py"
 	case fileExists(filepath.Join(cwd, "Gemfile.lock")):
 		cfg.SetupCommand = "bundle install"
 		cfg.StartCommand = "bundle exec ruby app.rb"
