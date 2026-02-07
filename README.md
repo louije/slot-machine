@@ -21,11 +21,11 @@ and prepare the next deploy.
   ┌──────────────────────────────────────────────────────────────┐
   │                    slot-machine daemon                       │
   │                                                              │
-  │   ┌──────────────┐                ┌──────────────┐           │
+  │   ┌───────────────┐               ┌───────────────┐          │
   │   │   slot A      │◄── live       │   slot B      │  staging │
   │   │   (v3)        │               │   (v4-wip)    │          │
   │   │               │               │               │          │
-  │   │  serving :3000 │               │  edit, test,  │          │
+  │   │ serving :3000 │               │  edit, test,  │          │
   │   │               │               │  commit here  │          │
   │   └───────┬───────┘               └───────────────┘          │
   │           │                                                  │
@@ -42,11 +42,11 @@ live, and the old live slot becomes the new workspace:
   ┌──────────────────────────────────────────────────────────────┐
   │                    slot-machine daemon                       │
   │                                                              │
-  │   ┌──────────────┐                ┌──────────────┐           │
+  │   ┌───────────────┐               ┌───────────────┐          │
   │   │   slot A      │  workspace    │   slot B      │◄── live  │
   │   │   (v3)        │               │   (v4)        │          │
   │   │               │               │               │          │
-  │   │  edit, test,  │               │  serving :3000 │          │
+  │   │  edit, test,  │               │ serving :3000 │          │
   │   │  commit here  │               │               │          │
   │   └───────────────┘               └───────┬───────┘          │
   │                                           │                  │
@@ -66,10 +66,10 @@ The inactive slot is designed as a staging area for an AI agent (or a human).
 The typical cycle:
 
 ```
-  ┌─────────┐     ┌──────────────┐     ┌────────────┐     ┌──────────┐
-  │  pull    │────▶│  edit & test  │────▶│   commit   │────▶│  deploy  │
-  │  main    │     │  in staging   │     │  to machine │     │          │
-  └─────────┘     └──────────────┘     └────────────┘     └──────────┘
+  ┌─────────┐     ┌───────────────┐     ┌────────────┐     ┌──────────┐
+  │  pull   │────▶│  edit & test  │────▶│   commit   │────▶│  deploy  │
+  │  main   │     │  in staging   │     │ to machine │     │          │
+  └─────────┘     └───────────────┘     └────────────┘     └──────────┘
        ▲                                                        │
        └────────────────────────────────────────────────────────┘
                           staging slot rotates
