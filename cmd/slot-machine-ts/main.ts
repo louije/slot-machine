@@ -26,6 +26,8 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 
+const specVersion = "1"; // spec/VERSION
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -690,6 +692,7 @@ if (!subcommand) {
   process.stderr.write("  deploy     deploy a commit\n");
   process.stderr.write("  rollback   rollback to previous\n");
   process.stderr.write("  status     show current status\n");
+  process.stderr.write("  version    print version info\n");
   process.exit(1);
 }
 
@@ -708,6 +711,9 @@ switch (subcommand) {
     break;
   case "status":
     await cmdStatus();
+    break;
+  case "version":
+    console.log(`slot-machine (ts/bun) spec/${specVersion}`);
     break;
   default:
     process.stderr.write(`unknown command: ${subcommand}\n`);

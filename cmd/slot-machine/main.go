@@ -32,6 +32,8 @@ import (
 	"time"
 )
 
+const specVersion = "1" // spec/VERSION
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -816,6 +818,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  deploy     deploy a commit")
 		fmt.Fprintln(os.Stderr, "  rollback   rollback to previous")
 		fmt.Fprintln(os.Stderr, "  status     show current status")
+		fmt.Fprintln(os.Stderr, "  version    print version info")
 		os.Exit(1)
 	}
 
@@ -830,6 +833,8 @@ func main() {
 		cmdRollback()
 	case "status":
 		cmdStatus()
+	case "version":
+		fmt.Printf("slot-machine (go) spec/%s\n", specVersion)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		os.Exit(1)
