@@ -82,6 +82,7 @@ type TestRepo struct {
 	Dir        string // path to the git repo
 	CommitA    string // first "good" commit
 	CommitB    string // second "good" commit
+	CommitC    string // third "good" commit
 	CommitBad  string // commit where the app starts unhealthy
 	CommitSlow string // commit where the app has a 3-second boot delay
 }
@@ -159,6 +160,12 @@ func setupTestRepo(t *testing.T, testappBin string, appPort, internalPort int) T
 		"commit B: healthy app v2",
 	)
 
+	// Commit C — third healthy variant.
+	commitC := writeStartAndCommit(
+		"#!/bin/sh\n# version C\nexec ./testapp\n",
+		"commit C: healthy app v3",
+	)
+
 	// Commit Bad — starts unhealthy (health check returns 503).
 	commitBad := writeStartAndCommit(
 		"#!/bin/sh\nexec ./testapp --start-unhealthy\n",
@@ -175,6 +182,7 @@ func setupTestRepo(t *testing.T, testappBin string, appPort, internalPort int) T
 		Dir:        dir,
 		CommitA:    commitA,
 		CommitB:    commitB,
+		CommitC:    commitC,
 		CommitBad:  commitBad,
 		CommitSlow: commitSlow,
 	}
@@ -190,7 +198,7 @@ func writeTestContract(t *testing.T, dir string, port, internalPort, drainTimeou
 	t.Helper()
 
 	if drainTimeoutMs == 0 {
-		drainTimeoutMs = 10000 // default 10s
+		drainTimeoutMs = 2000 // default 2s (enough for graceful shutdown)
 	}
 
 	contract := map[string]any{
@@ -198,7 +206,7 @@ func writeTestContract(t *testing.T, dir string, port, internalPort, drainTimeou
 		"port":              port,
 		"internal_port":     internalPort,
 		"health_endpoint":   "/healthz",
-		"health_timeout_ms": 5000,
+		"health_timeout_ms": 3000,
 		"drain_timeout_ms":  drainTimeoutMs,
 	}
 

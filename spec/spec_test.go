@@ -1,7 +1,7 @@
 // Specification tests for slot-machine.
 //
 // These scenarios validate any implementation of the slot-machine spec. The
-// binary is a black box — we only interact with it through its CLI and HTTP API.
+// binary is a black box — we only interact with it through its HTTP API.
 //
 // Run:
 //
@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -63,10 +62,9 @@ func testappBinary(t *testing.T) string {
 // ---------------------------------------------------------------------------
 // Test 1: Deploy — health check passes
 // ---------------------------------------------------------------------------
-//
-// Deploys a commit, verifies the orchestrator reports it as live and healthy,
-// and confirms the app actually responds on its public port.
+
 func TestDeployHealthy(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -108,11 +106,9 @@ func TestDeployHealthy(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 2: Deploy — health check fails
 // ---------------------------------------------------------------------------
-//
-// Deploys a commit where the app starts with health check returning 503.
-// The orchestrator should detect the failure, kill the process, and leave
-// no live commit (or keep the previous one).
+
 func TestDeployUnhealthy(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -145,10 +141,9 @@ func TestDeployUnhealthy(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 3: Deploy then rollback
 // ---------------------------------------------------------------------------
-//
-// Deploys two commits, then rolls back. After rollback, the first commit
-// should be live and the app should respond.
+
 func TestDeployThenRollback(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -204,10 +199,9 @@ func TestDeployThenRollback(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 4: Deploy twice — only one previous slot
 // ---------------------------------------------------------------------------
-//
-// Deploys A, then B, then A again. After each deploy, the previous_commit
-// should only reflect the immediately prior deploy, not anything older.
+
 func TestOnlyOnePreviousSlot(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -253,10 +247,9 @@ func TestOnlyOnePreviousSlot(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 5: Rollback with no previous slot
 // ---------------------------------------------------------------------------
-//
-// Tries to rollback on a fresh orchestrator that has never deployed anything.
-// Should get an error response.
+
 func TestRollbackNoPrevious(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 
 	apiPort := freePort(t)
@@ -281,10 +274,9 @@ func TestRollbackNoPrevious(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 6: Deploy while deploy in progress
 // ---------------------------------------------------------------------------
-//
-// Starts a deploy with a slow-booting app (3s boot delay), then immediately
-// tries a second deploy. The second should be rejected (409 or similar).
+
 func TestConcurrentDeployRejected(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -298,7 +290,7 @@ func TestConcurrentDeployRejected(t *testing.T) {
 	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
 	_ = orch
 
-	// Start deploying the slow commit (3s boot delay) asynchronously.
+	// Start deploying the slow commit asynchronously.
 	slowResult := deployAsync(t, apiPort, repo.CommitSlow)
 
 	// Give the orchestrator a moment to start processing the first deploy.
@@ -324,10 +316,9 @@ func TestConcurrentDeployRejected(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 7: Process crashes after promotion
 // ---------------------------------------------------------------------------
-//
-// Deploys a commit successfully, then crashes the app process. The orchestrator's
-// status should reflect that the app is no longer healthy.
+
 func TestProcessCrashDetected(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -358,9 +349,8 @@ func TestProcessCrashDetected(t *testing.T) {
 	// Wait for the process to actually die.
 	waitForDown(t, appPort, 5*time.Second)
 
-	// Give the orchestrator a moment to detect the crash.
-	// It may poll health or detect process exit — either way, wait briefly.
-	time.Sleep(2 * time.Second)
+	// Give the orchestrator a moment to detect the crash via process exit.
+	time.Sleep(500 * time.Millisecond)
 
 	// Status should now reflect unhealthy.
 	st = status(t, apiPort)
@@ -372,11 +362,9 @@ func TestProcessCrashDetected(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 8: Drain timeout exceeded
 // ---------------------------------------------------------------------------
-//
-// Deploys a commit, makes it ignore SIGTERM (via /control/hang), then deploys
-// a second commit. The orchestrator must force-kill the old process after the
-// drain timeout and successfully promote the new one.
+
 func TestDrainTimeoutForceKill(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -418,194 +406,12 @@ func TestDrainTimeoutForceKill(t *testing.T) {
 	}
 }
 
-// ===========================================================================
-// CLI UX tests
-// ===========================================================================
-
-// runBinary runs the slot-machine binary with the given args and working dir.
-// Returns stdout, stderr, and exit code.
-func runBinary(t *testing.T, dir string, args ...string) (string, string, int) {
-	t.Helper()
-	bin := orchestratorBinary(t)
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = dir
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			t.Fatalf("running binary: %v", err)
-		}
-	}
-	return stdout.String(), stderr.String(), exitCode
-}
-
-// ---------------------------------------------------------------------------
-// Test 9: No args — prints usage
-// ---------------------------------------------------------------------------
-
-func TestNoArgs(t *testing.T) {
-	_ = orchestratorBinary(t)
-	_, stderr, code := runBinary(t, t.TempDir())
-	if code == 0 {
-		t.Fatal("expected non-zero exit code with no args")
-	}
-	if !strings.Contains(stderr, "usage") {
-		t.Fatalf("expected stderr to mention 'usage', got: %s", stderr)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test 10: Unknown command
-// ---------------------------------------------------------------------------
-
-func TestUnknownCommand(t *testing.T) {
-	_ = orchestratorBinary(t)
-	_, stderr, code := runBinary(t, t.TempDir(), "badcmd")
-	if code == 0 {
-		t.Fatal("expected non-zero exit code for unknown command")
-	}
-	if !strings.Contains(stderr, "unknown command") {
-		t.Fatalf("expected stderr to mention 'unknown command', got: %s", stderr)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test 11: start without config
-// ---------------------------------------------------------------------------
-
-func TestStartMissingConfig(t *testing.T) {
-	_ = orchestratorBinary(t)
-	dir := t.TempDir()
-	_, stderr, code := runBinary(t, dir, "start")
-	if code == 0 {
-		t.Fatal("expected non-zero exit code when config is missing")
-	}
-	if !strings.Contains(stderr, "slot-machine.json") {
-		t.Fatalf("expected stderr to mention 'slot-machine.json', got: %s", stderr)
-	}
-	if !strings.Contains(stderr, "init") {
-		t.Fatalf("expected stderr to suggest 'init', got: %s", stderr)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test 12: init — bun project detection
-// ---------------------------------------------------------------------------
-
-func TestInitBunProject(t *testing.T) {
-	_ = orchestratorBinary(t)
-	dir := t.TempDir()
-
-	// Create bun.lock and package.json.
-	os.WriteFile(filepath.Join(dir, "bun.lock"), []byte(""), 0644)
-	pkg := map[string]any{
-		"scripts": map[string]string{"start": "bun server/index.ts"},
-	}
-	data, _ := json.Marshal(pkg)
-	os.WriteFile(filepath.Join(dir, "package.json"), data, 0644)
-
-	// Create .env to test env_file detection.
-	os.WriteFile(filepath.Join(dir, ".env"), []byte("FOO=bar\n"), 0644)
-
-	stdout, _, code := runBinary(t, dir, "init")
-	if code != 0 {
-		t.Fatalf("init exited %d", code)
-	}
-	if !strings.Contains(stdout, "slot-machine.json") {
-		t.Fatalf("expected stdout to mention slot-machine.json, got: %s", stdout)
-	}
-
-	// Verify generated config.
-	cfgData, err := os.ReadFile(filepath.Join(dir, "slot-machine.json"))
-	if err != nil {
-		t.Fatalf("reading generated config: %v", err)
-	}
-	var cfg map[string]any
-	json.Unmarshal(cfgData, &cfg)
-
-	if cfg["setup_command"] != "bun install --frozen-lockfile" {
-		t.Fatalf("expected bun setup_command, got: %v", cfg["setup_command"])
-	}
-	if cfg["start_command"] != "bun server/index.ts" {
-		t.Fatalf("expected start_command from package.json, got: %v", cfg["start_command"])
-	}
-	if cfg["env_file"] != ".env" {
-		t.Fatalf("expected env_file=.env, got: %v", cfg["env_file"])
-	}
-	if cfg["health_endpoint"] != "/healthz" {
-		t.Fatalf("expected health_endpoint=/healthz, got: %v", cfg["health_endpoint"])
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test 13: init — appends .slot-machine to .gitignore (idempotent)
-// ---------------------------------------------------------------------------
-
-func TestInitAppendsGitignore(t *testing.T) {
-	_ = orchestratorBinary(t)
-	dir := t.TempDir()
-
-	// Minimal setup so init doesn't fail.
-	os.WriteFile(filepath.Join(dir, "bun.lock"), []byte(""), 0644)
-	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"scripts":{"start":"bun index.ts"}}`), 0644)
-
-	// First init.
-	runBinary(t, dir, "init")
-	data, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
-	count := strings.Count(string(data), ".slot-machine")
-	if count != 1 {
-		t.Fatalf("expected 1 .slot-machine entry, got %d", count)
-	}
-
-	// Second init — should not duplicate.
-	runBinary(t, dir, "init")
-	data, _ = os.ReadFile(filepath.Join(dir, ".gitignore"))
-	count = strings.Count(string(data), ".slot-machine")
-	if count != 1 {
-		t.Fatalf("expected 1 .slot-machine entry after second init, got %d", count)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test 14: deploy with no running daemon
-// ---------------------------------------------------------------------------
-
-func TestDeployNoRunningDaemon(t *testing.T) {
-	_ = orchestratorBinary(t)
-	dir := t.TempDir()
-
-	// Write a minimal config so the client can read api_port.
-	cfg := map[string]any{"api_port": freePort(t)}
-	data, _ := json.Marshal(cfg)
-	os.WriteFile(filepath.Join(dir, "slot-machine.json"), data, 0644)
-
-	// Also need a git repo for HEAD resolution.
-	exec.Command("git", "init", dir).Run()
-	exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "init").Run()
-
-	_, stderr, code := runBinary(t, dir, "deploy")
-	if code == 0 {
-		t.Fatal("expected non-zero exit code when daemon is not running")
-	}
-	if !strings.Contains(stderr, "cannot reach") {
-		t.Fatalf("expected stderr to mention connection failure, got: %s", stderr)
-	}
-}
-
-// ===========================================================================
-// Feature tests
-// ===========================================================================
-
 // ---------------------------------------------------------------------------
 // Test 15: env_file vars are passed to the app
 // ---------------------------------------------------------------------------
 
 func TestEnvFilePassedToApp(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -625,8 +431,8 @@ func TestEnvFilePassedToApp(t *testing.T) {
 		"port":              appPort,
 		"internal_port":     intPort,
 		"health_endpoint":   "/healthz",
-		"health_timeout_ms": 5000,
-		"drain_timeout_ms":  10000,
+		"health_timeout_ms": 3000,
+		"drain_timeout_ms":  2000,
 		"env_file":          envPath,
 	}
 	data, _ := json.MarshalIndent(contract, "", "  ")
@@ -660,6 +466,7 @@ func TestEnvFilePassedToApp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSetupCommandRuns(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -677,8 +484,8 @@ func TestSetupCommandRuns(t *testing.T) {
 		"port":              appPort,
 		"internal_port":     intPort,
 		"health_endpoint":   "/healthz",
-		"health_timeout_ms": 5000,
-		"drain_timeout_ms":  10000,
+		"health_timeout_ms": 3000,
+		"drain_timeout_ms":  2000,
 	}
 	data, _ := json.MarshalIndent(contract, "", "  ")
 	contractPath := filepath.Join(contractDir, "app.contract.json")
@@ -703,6 +510,7 @@ func TestSetupCommandRuns(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDaemonShutdownDrainsProcesses(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 

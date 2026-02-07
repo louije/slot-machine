@@ -3,9 +3,6 @@
 // These tests validate v2 behaviors that v1 does not support:
 // zero-downtime deploys, symlink-based state persistence, staging slot,
 // garbage collection, and artifact preservation.
-//
-// Expected: all FAIL against a v1 implementation (except TestRollbackThenDeploy,
-// which validates behavior that v1 already supports).
 package spec
 
 import (
@@ -56,6 +53,7 @@ func statusV2(t *testing.T, apiPort int) statusV2Response {
 // v1 drains A before starting B — the port goes down during the gap.
 
 func TestZeroDowntime(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -107,11 +105,9 @@ func TestZeroDowntime(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 19: Status includes staging directory
 // ---------------------------------------------------------------------------
-//
-// After a deploy, GET /status must include a staging_dir field pointing to
-// the workspace directory. v1 has no staging concept.
 
 func TestStatusIncludesStagingDir(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -139,12 +135,9 @@ func TestStatusIncludesStagingDir(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 20: Staging preserves artifacts from promoted slot
 // ---------------------------------------------------------------------------
-//
-// After a deploy with a setup_command that creates a file, the new staging
-// directory should contain that file (inherited via CoW clone of the
-// promoted slot). v1 has no staging directory.
 
 func TestStagingPreservesArtifacts(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -161,8 +154,8 @@ func TestStagingPreservesArtifacts(t *testing.T) {
 		"port":              appPort,
 		"internal_port":     intPort,
 		"health_endpoint":   "/healthz",
-		"health_timeout_ms": 5000,
-		"drain_timeout_ms":  10000,
+		"health_timeout_ms": 3000,
+		"drain_timeout_ms":  2000,
 	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	contractPath := filepath.Join(contractDir, "app.contract.json")
@@ -186,11 +179,9 @@ func TestStagingPreservesArtifacts(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 21: Symlinks on disk
 // ---------------------------------------------------------------------------
-//
-// After deploys, the data directory must contain `live` and `prev` symlinks
-// pointing to the correct slot directories. v1 uses in-memory state only.
 
 func TestSymlinksOnDisk(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -248,12 +239,9 @@ func TestSymlinksOnDisk(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test 22: Daemon restart preserves state
 // ---------------------------------------------------------------------------
-//
-// After deploying and restarting the daemon (same data dir), the status
-// must still show the previously deployed commit. v1 stores all state in
-// memory — after restart, it forgets everything.
 
 func TestDaemonRestart(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -328,11 +316,11 @@ func TestDaemonRestart(t *testing.T) {
 // Test 23: Garbage collection
 // ---------------------------------------------------------------------------
 //
-// After three deploys (A → B → Slow), the first deploy's slot directory
+// After three deploys (A → B → C), the first deploy's slot directory
 // should be garbage collected. Only live + prev slot dirs remain.
-// v1 uses fixed slot names (slot-a, slot-b) and never GCs.
 
 func TestGarbageCollection(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -363,10 +351,10 @@ func TestGarbageCollection(t *testing.T) {
 		t.Fatal("deploy B failed")
 	}
 
-	// Deploy Slow (third deploy triggers GC of A).
-	dr, _ = deploy(t, apiPort, repo.CommitSlow)
+	// Deploy C (third deploy triggers GC of A).
+	dr, _ = deploy(t, apiPort, repo.CommitC)
 	if !dr.Success {
-		t.Fatal("deploy Slow failed")
+		t.Fatal("deploy C failed")
 	}
 
 	// A should be garbage collected.
@@ -386,9 +374,9 @@ func TestGarbageCollection(t *testing.T) {
 // ---------------------------------------------------------------------------
 //
 // After a rollback, deploying a new commit should work normally.
-// This tests the full cycle and should pass on both v1 and v2.
 
 func TestRollbackThenDeploy(t *testing.T) {
+	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
@@ -422,18 +410,13 @@ func TestRollbackThenDeploy(t *testing.T) {
 		t.Fatalf("after rollback: expected live=%s, got %s", repo.CommitA, st.LiveCommit)
 	}
 
-	// Deploy Slow — should work after rollback.
-	dr, _ = deploy(t, apiPort, repo.CommitSlow)
+	// Deploy C — should work after rollback.
+	dr, _ = deploy(t, apiPort, repo.CommitC)
 	if !dr.Success {
 		t.Fatal("deploy after rollback failed")
 	}
 	st = status(t, apiPort)
-	if st.LiveCommit != repo.CommitSlow {
-		t.Fatalf("after post-rollback deploy: expected live=%s, got %s", repo.CommitSlow, st.LiveCommit)
+	if st.LiveCommit != repo.CommitC {
+		t.Fatalf("after post-rollback deploy: expected live=%s, got %s", repo.CommitC, st.LiveCommit)
 	}
 }
-
-// TestDynamicPorts is not included separately — TestZeroDowntime already
-// validates that two slot processes can run simultaneously (which requires
-// dynamic port assignment). A dedicated test would need access to the
-// internal port assignments, which are not exposed in the current API.
