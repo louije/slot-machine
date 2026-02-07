@@ -1,4 +1,4 @@
-// Dummy test app for the orchestrator test harness.
+// Dummy test app for the slot-machine spec tests.
 //
 // A tiny HTTP server the orchestrator can deploy. It serves a public endpoint
 // and internal control/health endpoints on separate ports. Various flags let
@@ -121,6 +121,12 @@ func main() {
 			}
 		}()
 		fmt.Fprint(w, "now ignoring SIGTERM")
+	})
+
+	// GET /env?key=X — returns the value of an environment variable.
+	intMux.HandleFunc("/env", func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Query().Get("key")
+		fmt.Fprint(w, os.Getenv(key))
 	})
 
 	// POST /control/crash — exits the process immediately.

@@ -1,9 +1,9 @@
-// Test harness helpers for orchestrator integration tests.
+// Helpers for the slot-machine specification tests.
 //
-// These functions set up git repos, start/stop the orchestrator binary under
-// test, and make HTTP calls to verify behavior. The orchestrator is a black box —
-// we only interact with it through its HTTP API and the contracts from the spec.
-package testharness
+// These functions set up git repos, start/stop the binary under test, and make
+// HTTP calls to verify behavior. The implementation is a black box — we only
+// interact with it through its HTTP API.
+package spec
 
 import (
 	"bytes"
