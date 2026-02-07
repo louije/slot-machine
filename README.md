@@ -13,43 +13,76 @@ slot-machine status     # what's running
 ## How it works
 
 The daemon manages two **slots** — independent git worktrees of your app.
-At any time, one slot is live and one is the previous deploy (or empty).
-Deploys alternate between them:
+One slot is live (serving traffic). The other is the **workspace**: a full
+working tree where you — or an agent — can edit code, run tests, commit,
+and prepare the next deploy.
 
 ```
-                 ┌─────────────────────────────────────────────┐
-                 │              slot-machine daemon             │
-                 │                                             │
-                 │   ┌─────────┐           ┌─────────┐        │
- POST /deploy ──▶│   │ slot  A │◄── live   │ slot  B │ prev   │
-                 │   │ (v3)    │           │ (v2)    │        │
-                 │   └────┬────┘           └─────────┘        │
-                 │        │                                    │
-                 └────────┼────────────────────────────────────┘
-                          │
-                          ▼
-                    :3000  app
+  ┌──────────────────────────────────────────────────────────────┐
+  │                    slot-machine daemon                       │
+  │                                                              │
+  │   ┌──────────────┐                ┌──────────────┐           │
+  │   │   slot A      │◄── live       │   slot B      │  staging │
+  │   │   (v3)        │               │   (v4-wip)    │          │
+  │   │               │               │               │          │
+  │   │  serving :3000 │               │  edit, test,  │          │
+  │   │               │               │  commit here  │          │
+  │   └───────┬───────┘               └───────────────┘          │
+  │           │                                                  │
+  └───────────┼──────────────────────────────────────────────────┘
+              │
+              ▼
+         :3000 app
 ```
 
-After the next deploy, the slots swap:
+When the work is ready, `slot-machine deploy` promotes the staging slot to
+live, and the old live slot becomes the new workspace:
 
 ```
-                 ┌─────────────────────────────────────────────┐
-                 │              slot-machine daemon             │
-                 │                                             │
-                 │   ┌─────────┐           ┌─────────┐        │
-                 │   │ slot  A │ prev      │ slot  B │◄── live│
-                 │   │ (v3)    │           │ (v4)    │        │
-                 │   └─────────┘           └────┬────┘        │
-                 │                              │              │
-                 └──────────────────────────────┼──────────────┘
-                                                │
-                                                ▼
-                                          :3000  app
+  ┌──────────────────────────────────────────────────────────────┐
+  │                    slot-machine daemon                       │
+  │                                                              │
+  │   ┌──────────────┐                ┌──────────────┐           │
+  │   │   slot A      │  workspace    │   slot B      │◄── live  │
+  │   │   (v3)        │               │   (v4)        │          │
+  │   │               │               │               │          │
+  │   │  edit, test,  │               │  serving :3000 │          │
+  │   │  commit here  │               │               │          │
+  │   └───────────────┘               └───────┬───────┘          │
+  │                                           │                  │
+  └───────────────────────────────────────────┼──────────────────┘
+                                              │
+                                              ▼
+                                         :3000 app
 ```
 
-Rollback re-starts the previous slot. No re-checkout, no re-install — the
-worktree and `node_modules` are already there.
+The slots are git worktrees, so `node_modules`, build artifacts, and data
+directories persist across deploys. Rollback re-starts the previous slot
+instantly — no re-checkout, no re-install.
+
+## The agent workflow
+
+The inactive slot is designed as a staging area for an AI agent (or a human).
+The typical cycle:
+
+```
+  ┌─────────┐     ┌──────────────┐     ┌────────────┐     ┌──────────┐
+  │  pull    │────▶│  edit & test  │────▶│   commit   │────▶│  deploy  │
+  │  main    │     │  in staging   │     │  to machine │     │          │
+  └─────────┘     └──────────────┘     └────────────┘     └──────────┘
+       ▲                                                        │
+       └────────────────────────────────────────────────────────┘
+                          staging slot rotates
+```
+
+1. The agent works on a `machine` branch in the inactive slot
+2. Humans push to `main` on the remote
+3. The agent pulls `main` and merges it into `machine`
+4. `slot-machine deploy` promotes the result
+5. The old live slot is now the workspace — repeat
+
+The live app is never touched. If a deploy fails health checks, the process
+is killed and the live slot stays untouched. Rollback is always one command away.
 
 ## Deploy sequence
 
@@ -58,11 +91,11 @@ sequenceDiagram
     participant C as Client
     participant D as Daemon
     participant A as Slot A (live)
-    participant B as Slot B (target)
+    participant B as Slot B (staging)
 
     C->>D: POST /deploy {commit}
     D->>D: Lock (reject concurrent deploys)
-    D->>B: git worktree checkout
+    D->>B: git checkout commit
     D->>B: setup_command (bun install, pip install, ...)
     D->>A: SIGTERM → drain
     Note over A: graceful shutdown<br/>or SIGKILL after timeout
@@ -72,7 +105,7 @@ sequenceDiagram
         B-->>D: 200 OK?
     end
     alt Healthy
-        D->>D: Promote B to live, A becomes prev
+        D->>D: Promote B to live, A becomes workspace
         D-->>C: {success: true, slot: "b"}
     else Unhealthy
         D->>B: SIGKILL
@@ -129,9 +162,9 @@ Project detection: `bun.lock` → Bun, `package-lock.json` → npm,
 
 ## The spec
 
-The `spec/` directory defines the contract any slot-machine implementation must
-satisfy. It's a Go test suite that treats the binary as a black box — all
-interaction is through the CLI and HTTP API.
+The `spec/` directory defines the slot-machine contract as an executable test
+suite. It treats the binary as a black box — all interaction is through the
+CLI and HTTP API. The current spec version is in `spec/VERSION`.
 
 **17 scenarios:**
 
@@ -155,31 +188,11 @@ interaction is through the CLI and HTTP API.
 | 16 | `TestSetupCommandRuns` | Setup command executes before start |
 | 17 | `TestDaemonShutdownDrainsProcesses` | SIGTERM to daemon → child processes cleaned up |
 
-### Running the spec
-
 ```sh
 # build
 go build -o slot-machine ./cmd/slot-machine/
 go build -o spec/testapp/testapp ./spec/testapp/
 
-# test
+# run the spec
 ORCHESTRATOR_BIN=$(pwd)/slot-machine go test -v -count=1 ./spec/
 ```
-
-### Writing a new implementation
-
-Write a binary in any language that:
-
-1. Accepts the same subcommands (`init`, `start`, `deploy`, `rollback`, `status`, `version`)
-2. `start` accepts `--config`, `--repo`, `--data`, `--port`, `--no-proxy` flags
-3. Exposes the same HTTP API on the API port (`GET /`, `POST /deploy`, `POST /rollback`, `GET /status`)
-4. Manages app processes with the same lifecycle (worktree → setup → drain → start → health check)
-
-Then point the spec at it:
-
-```sh
-ORCHESTRATOR_BIN=/path/to/your-binary go test -v -count=1 ./spec/
-```
-
-The current spec version is in `spec/VERSION`. Implementations should declare
-which spec version they target (see `slot-machine version`).
