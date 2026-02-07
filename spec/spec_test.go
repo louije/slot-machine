@@ -692,8 +692,7 @@ func TestSetupCommandRuns(t *testing.T) {
 	}
 
 	// Check that .setup-done exists in the slot directory.
-	// The slot dir is inside the data dir: <dataDir>/slot-a/.setup-done
-	marker := filepath.Join(orch.DataDir, "slot-a", ".setup-done")
+	marker := filepath.Join(orch.DataDir, dr.Slot, ".setup-done")
 	if _, err := os.Stat(marker); os.IsNotExist(err) {
 		t.Fatalf("setup_command did not run: %s not found", marker)
 	}

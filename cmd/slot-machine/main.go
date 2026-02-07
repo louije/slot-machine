@@ -21,7 +21,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -32,7 +34,7 @@ import (
 	"time"
 )
 
-const specVersion = "1" // spec/VERSION
+const specVersion = "2" // spec/VERSION
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,25 +53,97 @@ type config struct {
 }
 
 type slot struct {
-	commit string
-	dir    string
-	cmd    *exec.Cmd
-	done   chan struct{}
-	alive  bool
+	name    string // directory basename, e.g. "slot-abc1234"
+	commit  string
+	dir     string // absolute path
+	cmd     *exec.Cmd
+	done    chan struct{}
+	alive   bool
+	appPort int // dynamic
+	intPort int // dynamic
 }
 
 type orchestrator struct {
 	cfg     config
 	repoDir string
 	dataDir string
-	noProxy bool
 
 	mu         sync.Mutex
 	deploying  bool
-	liveSlot   string
-	prevSlot   string
-	slots      map[string]*slot
+	liveSlot   *slot
+	prevSlot   *slot
 	lastDeploy time.Time
+
+	appProxy *dynamicProxy // proxies config.Port → live slot's appPort
+	intProxy *dynamicProxy // proxies config.InternalPort → live slot's intPort
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic reverse proxy
+// ---------------------------------------------------------------------------
+
+type dynamicProxy struct {
+	mu   sync.RWMutex
+	port int
+	addr string
+	srv  *http.Server
+}
+
+func newDynamicProxy(addr string) *dynamicProxy {
+	return &dynamicProxy{addr: addr}
+}
+
+func (p *dynamicProxy) setTarget(port int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.port = port
+	if port > 0 && p.srv == nil && p.addr != "" {
+		ln, err := net.Listen("tcp", p.addr)
+		if err != nil {
+			return
+		}
+		p.srv = &http.Server{Handler: http.HandlerFunc(p.serveHTTP)}
+		go p.srv.Serve(ln)
+	}
+}
+
+func (p *dynamicProxy) clearTarget() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.port = 0
+	if p.srv != nil {
+		p.srv.Close()
+		p.srv = nil
+	}
+}
+
+func (p *dynamicProxy) shutdown() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.port = 0
+	if p.srv != nil {
+		p.srv.Shutdown(context.Background())
+		p.srv = nil
+	}
+}
+
+func (p *dynamicProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	p.mu.RLock()
+	port := p.port
+	p.mu.RUnlock()
+
+	if port == 0 {
+		http.Error(w, "no live slot", http.StatusServiceUnavailable)
+		return
+	}
+
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = "http"
+			req.URL.Host = fmt.Sprintf("127.0.0.1:%d", port)
+		},
+	}
+	proxy.ServeHTTP(w, r)
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +216,7 @@ type statusResponse struct {
 	LiveCommit     string `json:"live_commit"`
 	PreviousSlot   string `json:"previous_slot"`
 	PreviousCommit string `json:"previous_commit"`
+	StagingDir     string `json:"staging_dir"`
 	LastDeployTime string `json:"last_deploy_time"`
 	Healthy        bool   `json:"healthy"`
 }
@@ -151,17 +226,17 @@ func (o *orchestrator) handleStatus(w http.ResponseWriter, r *http.Request) {
 	defer o.mu.Unlock()
 
 	resp := statusResponse{
-		LiveSlot:     o.liveSlot,
-		PreviousSlot: o.prevSlot,
+		StagingDir: "slot-staging",
 	}
 
-	if o.liveSlot != "" {
-		s := o.slots[o.liveSlot]
-		resp.LiveCommit = s.commit
-		resp.Healthy = s.alive
+	if o.liveSlot != nil {
+		resp.LiveSlot = o.liveSlot.name
+		resp.LiveCommit = o.liveSlot.commit
+		resp.Healthy = o.liveSlot.alive
 	}
-	if o.prevSlot != "" {
-		resp.PreviousCommit = o.slots[o.prevSlot].commit
+	if o.prevSlot != nil {
+		resp.PreviousSlot = o.prevSlot.name
+		resp.PreviousCommit = o.prevSlot.commit
 	}
 	if !o.lastDeploy.IsZero() {
 		resp.LastDeployTime = o.lastDeploy.Format(time.RFC3339)
@@ -171,7 +246,7 @@ func (o *orchestrator) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// Deploy logic
+// Deploy logic (v2: start-before-drain, dynamic ports)
 // ---------------------------------------------------------------------------
 
 func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
@@ -181,11 +256,8 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 		return deployResponse{Error: "deploy in progress"}, 409
 	}
 	o.deploying = true
-	liveSlotName := o.liveSlot
-	var liveSlotObj *slot
-	if liveSlotName != "" {
-		liveSlotObj = o.slots[liveSlotName]
-	}
+	oldLive := o.liveSlot
+	oldPrev := o.prevSlot
 	o.mu.Unlock()
 
 	defer func() {
@@ -194,55 +266,99 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 		o.mu.Unlock()
 	}()
 
-	inactive := "a"
-	if liveSlotName == "a" {
-		inactive = "b"
-	}
+	stagingDir := filepath.Join(o.dataDir, "slot-staging")
 
-	slotDir := filepath.Join(o.dataDir, "slot-"+inactive)
-	if err := o.prepareSlot(slotDir, commit); err != nil {
+	// 1. Checkout commit in staging.
+	if err := o.prepareSlot(stagingDir, commit); err != nil {
 		return deployResponse{Error: err.Error()}, 500
 	}
 
+	// 2. Run setup command.
+	appPort, err := findFreePort()
+	if err != nil {
+		return deployResponse{Error: "free port: " + err.Error()}, 500
+	}
+	intPort, err := findFreePort()
+	if err != nil {
+		return deployResponse{Error: "free port: " + err.Error()}, 500
+	}
+
 	if o.cfg.SetupCommand != "" {
-		if err := o.runSetup(slotDir); err != nil {
+		if err := o.runSetup(stagingDir, appPort, intPort); err != nil {
 			return deployResponse{Error: "setup: " + err.Error()}, 500
 		}
 	}
 
-	if liveSlotObj != nil {
-		o.drain(liveSlotObj)
-	}
-
-	newSlot, err := o.startProcess(slotDir, commit)
+	// 3. Start process with dynamic ports.
+	newSlot, err := o.startProcess(stagingDir, commit, appPort, intPort)
 	if err != nil {
 		return deployResponse{Error: "start: " + err.Error()}, 500
 	}
 
-	if o.healthCheck(newSlot) {
-		prevCommit := ""
-		o.mu.Lock()
-		if liveSlotName != "" && o.slots[liveSlotName] != nil {
-			prevCommit = o.slots[liveSlotName].commit
-		}
-		o.prevSlot = liveSlotName
-		o.liveSlot = inactive
-		o.slots[inactive] = newSlot
-		o.lastDeploy = time.Now()
-		o.mu.Unlock()
-
-		return deployResponse{
-			Success:        true,
-			Slot:           inactive,
-			Commit:         commit,
-			PreviousCommit: prevCommit,
-		}, 200
+	// 4. Health check (old live still serving through proxy).
+	if !o.healthCheck(newSlot) {
+		syscall.Kill(-newSlot.cmd.Process.Pid, syscall.SIGKILL)
+		<-newSlot.done
+		return deployResponse{}, 200
 	}
 
-	syscall.Kill(-newSlot.cmd.Process.Pid, syscall.SIGKILL)
-	<-newSlot.done
+	// 5. Healthy — promote.
+	slotName := fmt.Sprintf("slot-%s", commit[:8])
+	slotDir := filepath.Join(o.dataDir, slotName)
 
-	return deployResponse{}, 200
+	// GC old prev first (avoid name collision if re-deploying same commit).
+	if oldPrev != nil {
+		o.drain(oldPrev)
+		o.removeWorktree(oldPrev.dir)
+	}
+
+	// Rename staging → slot-<hash>.
+	if err := o.promoteStaging(stagingDir, slotDir); err != nil {
+		// Non-fatal: process is running from stagingDir, just use that path.
+		slotDir = stagingDir
+		slotName = "slot-staging"
+	}
+	newSlot.dir = slotDir
+	newSlot.name = slotName
+
+	// Switch proxy to new slot.
+	o.appProxy.setTarget(appPort)
+	o.intProxy.setTarget(intPort)
+
+	// Update state BEFORE draining — prevents crash callback from clearing proxy.
+	prevCommit := ""
+	o.mu.Lock()
+	if oldLive != nil {
+		prevCommit = oldLive.commit
+	}
+	o.prevSlot = oldLive
+	o.liveSlot = newSlot
+	o.lastDeploy = time.Now()
+	o.mu.Unlock()
+
+	// Drain old live (it was still serving until proxy switch above).
+	if oldLive != nil {
+		o.drain(oldLive)
+	}
+
+	// Update symlinks.
+	atomicSymlink(filepath.Join(o.dataDir, "live"), slotName)
+	if oldLive != nil {
+		atomicSymlink(filepath.Join(o.dataDir, "prev"), oldLive.name)
+	}
+
+	// Create new staging (CoW clone of promoted slot).
+	o.createStaging(slotDir, commit)
+
+	// Journal (best-effort).
+	o.appendJournal("deploy", commit, slotName, prevCommit)
+
+	return deployResponse{
+		Success:        true,
+		Slot:           slotName,
+		Commit:         commit,
+		PreviousCommit: prevCommit,
+	}, 200
 }
 
 // ---------------------------------------------------------------------------
@@ -255,16 +371,13 @@ func (o *orchestrator) doRollback() (rollbackResponse, int) {
 		o.mu.Unlock()
 		return rollbackResponse{Error: "deploy in progress"}, 409
 	}
-	if o.prevSlot == "" {
+	if o.prevSlot == nil {
 		o.mu.Unlock()
 		return rollbackResponse{Error: "no previous slot"}, 400
 	}
 	o.deploying = true
-
-	prevSlotName := o.prevSlot
-	prevSlotObj := o.slots[prevSlotName]
-	liveSlotName := o.liveSlot
-	liveSlotObj := o.slots[liveSlotName]
+	oldLive := o.liveSlot
+	prev := o.prevSlot
 	o.mu.Unlock()
 
 	defer func() {
@@ -273,49 +386,84 @@ func (o *orchestrator) doRollback() (rollbackResponse, int) {
 		o.mu.Unlock()
 	}()
 
-	if liveSlotObj != nil {
-		o.drain(liveSlotObj)
+	// Start prev slot with fresh dynamic ports.
+	appPort, err := findFreePort()
+	if err != nil {
+		return rollbackResponse{Error: "free port: " + err.Error()}, 500
+	}
+	intPort, err := findFreePort()
+	if err != nil {
+		return rollbackResponse{Error: "free port: " + err.Error()}, 500
 	}
 
-	newSlot, err := o.startProcess(prevSlotObj.dir, prevSlotObj.commit)
+	newSlot, err := o.startProcess(prev.dir, prev.commit, appPort, intPort)
 	if err != nil {
 		return rollbackResponse{Error: "start: " + err.Error()}, 500
 	}
 
-	if o.healthCheck(newSlot) {
-		o.mu.Lock()
-		o.liveSlot = prevSlotName
-		o.prevSlot = liveSlotName
-		o.slots[prevSlotName] = newSlot
-		o.lastDeploy = time.Now()
-		o.mu.Unlock()
-
-		return rollbackResponse{
-			Success: true,
-			Slot:    prevSlotName,
-			Commit:  prevSlotObj.commit,
-		}, 200
+	if !o.healthCheck(newSlot) {
+		syscall.Kill(-newSlot.cmd.Process.Pid, syscall.SIGKILL)
+		<-newSlot.done
+		return rollbackResponse{Error: "health check failed"}, 500
 	}
 
-	syscall.Kill(-newSlot.cmd.Process.Pid, syscall.SIGKILL)
-	<-newSlot.done
-	return rollbackResponse{Error: "health check failed"}, 500
+	// Switch proxy.
+	o.appProxy.setTarget(appPort)
+	o.intProxy.setTarget(intPort)
+
+	// Update state BEFORE draining — prevents crash callback from clearing proxy.
+	newSlot.name = prev.name
+	o.mu.Lock()
+	o.liveSlot = newSlot
+	o.prevSlot = oldLive
+	o.lastDeploy = time.Now()
+	o.mu.Unlock()
+
+	// Drain old live.
+	if oldLive != nil {
+		o.drain(oldLive)
+	}
+
+	// Update symlinks.
+	atomicSymlink(filepath.Join(o.dataDir, "live"), prev.name)
+	if oldLive != nil {
+		atomicSymlink(filepath.Join(o.dataDir, "prev"), oldLive.name)
+	}
+
+	// Create new staging.
+	o.createStaging(prev.dir, prev.commit)
+
+	return rollbackResponse{
+		Success: true,
+		Slot:    prev.name,
+		Commit:  prev.commit,
+	}, 200
 }
 
 // ---------------------------------------------------------------------------
 // Process management
 // ---------------------------------------------------------------------------
 
-func (o *orchestrator) runSetup(dir string) error {
+func findFreePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	return port, nil
+}
+
+func (o *orchestrator) runSetup(dir string, appPort, intPort int) error {
 	cmd := exec.Command("/bin/sh", "-c", o.cfg.SetupCommand)
 	cmd.Dir = dir
-	cmd.Env = o.buildEnv()
+	cmd.Env = o.buildEnv(appPort, intPort)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-func (o *orchestrator) buildEnv() []string {
+func (o *orchestrator) buildEnv(appPort, intPort int) []string {
 	env := os.Environ()
 	if o.cfg.EnvFile != "" {
 		if extra, err := loadEnvFile(o.cfg.EnvFile); err == nil {
@@ -323,16 +471,16 @@ func (o *orchestrator) buildEnv() []string {
 		}
 	}
 	env = append(env,
-		fmt.Sprintf("PORT=%d", o.cfg.Port),
-		fmt.Sprintf("INTERNAL_PORT=%d", o.cfg.InternalPort),
+		fmt.Sprintf("PORT=%d", appPort),
+		fmt.Sprintf("INTERNAL_PORT=%d", intPort),
 	)
 	return env
 }
 
-func (o *orchestrator) startProcess(dir, commit string) (*slot, error) {
+func (o *orchestrator) startProcess(dir, commit string, appPort, intPort int) (*slot, error) {
 	cmd := exec.Command("/bin/sh", "-c", o.cfg.StartCommand)
 	cmd.Dir = dir
-	cmd.Env = o.buildEnv()
+	cmd.Env = o.buildEnv(appPort, intPort)
 	logPath := filepath.Join(o.dataDir, fmt.Sprintf("%s.log", filepath.Base(dir)))
 	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 		cmd.Stdout = logFile
@@ -345,17 +493,24 @@ func (o *orchestrator) startProcess(dir, commit string) (*slot, error) {
 	}
 
 	s := &slot{
-		commit: commit,
-		dir:    dir,
-		cmd:    cmd,
-		done:   make(chan struct{}),
-		alive:  true,
+		name:    filepath.Base(dir),
+		commit:  commit,
+		dir:     dir,
+		cmd:     cmd,
+		done:    make(chan struct{}),
+		alive:   true,
+		appPort: appPort,
+		intPort: intPort,
 	}
 
 	go func() {
 		cmd.Wait()
 		o.mu.Lock()
 		s.alive = false
+		if o.liveSlot == s {
+			o.appProxy.clearTarget()
+			o.intProxy.clearTarget()
+		}
 		o.mu.Unlock()
 		close(s.done)
 	}()
@@ -363,12 +518,14 @@ func (o *orchestrator) startProcess(dir, commit string) (*slot, error) {
 	return s, nil
 }
 
-// drainAll stops all managed processes. Called on daemon shutdown.
 func (o *orchestrator) drainAll() {
 	o.mu.Lock()
-	slots := make([]*slot, 0, len(o.slots))
-	for _, s := range o.slots {
-		slots = append(slots, s)
+	var slots []*slot
+	if o.liveSlot != nil {
+		slots = append(slots, o.liveSlot)
+	}
+	if o.prevSlot != nil && o.prevSlot.cmd != nil {
+		slots = append(slots, o.prevSlot)
 	}
 	o.mu.Unlock()
 	for _, s := range slots {
@@ -394,7 +551,7 @@ func (o *orchestrator) drain(s *slot) {
 func (o *orchestrator) healthCheck(s *slot) bool {
 	timeout := time.Duration(o.cfg.HealthTimeoutMs) * time.Millisecond
 	deadline := time.Now().Add(timeout)
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", o.cfg.InternalPort, o.cfg.HealthEndpoint)
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", s.intPort, o.cfg.HealthEndpoint)
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 
 	for time.Now().Before(deadline) {
@@ -418,7 +575,7 @@ func (o *orchestrator) healthCheck(s *slot) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Git worktree
+// Git worktree management
 // ---------------------------------------------------------------------------
 
 func (o *orchestrator) prepareSlot(slotDir, commit string) error {
@@ -441,6 +598,212 @@ func (o *orchestrator) prepareSlot(slotDir, commit string) error {
 		return fmt.Errorf("git worktree add: %s: %w", out, err)
 	}
 	return nil
+}
+
+// promoteStaging renames slot-staging → slot-<hash> and repairs git worktree metadata.
+func (o *orchestrator) promoteStaging(oldDir, newDir string) error {
+	if err := os.Rename(oldDir, newDir); err != nil {
+		return err
+	}
+
+	// Read .git file to find the worktree metadata dir.
+	gitFile := filepath.Join(newDir, ".git")
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return err
+	}
+
+	metaDir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+
+	// Update gitdir in metadata to point to new location.
+	absNewGit, _ := filepath.Abs(filepath.Join(newDir, ".git"))
+	os.WriteFile(filepath.Join(metaDir, "gitdir"), []byte(absNewGit+"\n"), 0644)
+
+	// Rename metadata dir to match new slot name.
+	newName := filepath.Base(newDir)
+	newMetaDir := filepath.Join(filepath.Dir(metaDir), newName)
+	if metaDir != newMetaDir {
+		os.Rename(metaDir, newMetaDir)
+		// Update .git file to point to renamed metadata dir.
+		absNewMeta, _ := filepath.Abs(newMetaDir)
+		os.WriteFile(gitFile, []byte("gitdir: "+absNewMeta+"\n"), 0644)
+	}
+
+	return nil
+}
+
+// createStaging creates a new slot-staging directory by cloning the promoted slot.
+func (o *orchestrator) createStaging(srcDir, commit string) {
+	dstDir := filepath.Join(o.dataDir, "slot-staging")
+
+	// Try CoW clone (macOS APFS).
+	cpCmd := exec.Command("cp", "-c", "-R", srcDir, dstDir)
+	if err := cpCmd.Run(); err == nil {
+		// Fix git worktree metadata for the clone.
+		if o.fixClonedWorktree(dstDir, commit) == nil {
+			return
+		}
+		// Clone metadata repair failed — remove and fall back.
+		os.RemoveAll(dstDir)
+	}
+
+	// Fallback: fresh worktree.
+	exec.Command("git", "-C", o.repoDir, "worktree", "prune").Run()
+	exec.Command("git", "-C", o.repoDir, "worktree", "add", "--detach", dstDir, commit).Run()
+}
+
+// fixClonedWorktree sets up proper git worktree metadata for a cloned directory.
+func (o *orchestrator) fixClonedWorktree(wtDir, commit string) error {
+	gitFile := filepath.Join(wtDir, ".git")
+	os.Remove(gitFile)
+
+	// Find repo's .git directory.
+	repoGitDir := filepath.Join(o.repoDir, ".git")
+
+	// Ensure it's a directory (not a worktree .git file).
+	info, err := os.Stat(repoGitDir)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("repo .git is not a directory")
+	}
+
+	wtName := "slot-staging"
+	metaDir := filepath.Join(repoGitDir, "worktrees", wtName)
+
+	os.RemoveAll(metaDir)
+	os.MkdirAll(metaDir, 0755)
+
+	absWtDir, _ := filepath.Abs(wtDir)
+	absGitFile := filepath.Join(absWtDir, ".git")
+	absMetaDir, _ := filepath.Abs(metaDir)
+
+	// Write metadata files.
+	os.WriteFile(filepath.Join(metaDir, "HEAD"), []byte(commit+"\n"), 0644)
+	os.WriteFile(filepath.Join(metaDir, "commondir"), []byte("../..\n"), 0644)
+	os.WriteFile(filepath.Join(metaDir, "gitdir"), []byte(absGitFile+"\n"), 0644)
+
+	// Write .git file in worktree.
+	os.WriteFile(gitFile, []byte("gitdir: "+absMetaDir+"\n"), 0644)
+
+	return nil
+}
+
+func (o *orchestrator) removeWorktree(dir string) {
+	cmd := exec.Command("git", "-C", o.repoDir, "worktree", "remove", "--force", dir)
+	if err := cmd.Run(); err != nil {
+		os.RemoveAll(dir)
+		exec.Command("git", "-C", o.repoDir, "worktree", "prune").Run()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// State management (symlinks + journal)
+// ---------------------------------------------------------------------------
+
+func atomicSymlink(linkPath, target string) error {
+	tmpLink := linkPath + ".tmp"
+	os.Remove(tmpLink)
+	if err := os.Symlink(target, tmpLink); err != nil {
+		return err
+	}
+	return os.Rename(tmpLink, linkPath)
+}
+
+func (o *orchestrator) recoverState() {
+	// Read live symlink.
+	liveLink := filepath.Join(o.dataDir, "live")
+	target, err := os.Readlink(liveLink)
+	if err != nil {
+		return
+	}
+
+	slotDir := filepath.Join(o.dataDir, target)
+	if _, err := os.Stat(slotDir); err != nil {
+		os.Remove(liveLink)
+		return
+	}
+
+	commit := o.getWorktreeCommit(slotDir)
+	if commit == "" {
+		return
+	}
+
+	appPort, err := findFreePort()
+	if err != nil {
+		return
+	}
+	intPort, err := findFreePort()
+	if err != nil {
+		return
+	}
+
+	s, err := o.startProcess(slotDir, commit, appPort, intPort)
+	if err != nil {
+		fmt.Printf("warning: failed to restart live slot: %v\n", err)
+		return
+	}
+
+	if o.healthCheck(s) {
+		s.name = target
+		o.liveSlot = s
+		o.appProxy.setTarget(appPort)
+		o.intProxy.setTarget(intPort)
+		fmt.Printf("recovered live slot: %s (%s)\n", target, shortHash(commit))
+	} else {
+		syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+		<-s.done
+	}
+
+	// Read prev symlink.
+	prevLink := filepath.Join(o.dataDir, "prev")
+	prevTarget, err := os.Readlink(prevLink)
+	if err != nil {
+		return
+	}
+	prevDir := filepath.Join(o.dataDir, prevTarget)
+	if _, err := os.Stat(prevDir); err != nil {
+		os.Remove(prevLink)
+		return
+	}
+	prevCommit := o.getWorktreeCommit(prevDir)
+	if prevCommit != "" {
+		o.prevSlot = &slot{
+			name:   prevTarget,
+			commit: prevCommit,
+			dir:    prevDir,
+			done:   make(chan struct{}),
+		}
+		close(o.prevSlot.done) // Not running.
+	}
+}
+
+func (o *orchestrator) getWorktreeCommit(dir string) string {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (o *orchestrator) appendJournal(action, commit, slotDir, prevCommit string) {
+	entry := map[string]string{
+		"time":        time.Now().Format(time.RFC3339),
+		"action":      action,
+		"commit":      commit,
+		"slot_dir":    slotDir,
+		"prev_commit": prevCommit,
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	path := filepath.Join(o.dataDir, "journal.ndjson")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(append(data, '\n'))
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +837,6 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// gitHeadCommit returns the current HEAD commit hash for the repo at dir.
 func gitHeadCommit(dir string) (string, error) {
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
 	out, err := cmd.Output()
@@ -504,7 +866,6 @@ func cmdInit() {
 		APIPort:         9100,
 	}
 
-	// Detect project type and set setup/start commands.
 	switch {
 	case fileExists(filepath.Join(cwd, "bun.lock")):
 		cfg.SetupCommand = "bun install --frozen-lockfile"
@@ -532,12 +893,10 @@ func cmdInit() {
 	}
 	fmt.Printf("wrote %s\n", cfgPath)
 
-	// Append .slot-machine to .gitignore if not already there.
 	gitignorePath := filepath.Join(cwd, ".gitignore")
 	if !gitignoreContains(gitignorePath, ".slot-machine") {
 		f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err == nil {
-			// Add newline before if file doesn't end with one.
 			if info, _ := f.Stat(); info.Size() > 0 {
 				buf := make([]byte, 1)
 				if fRead, err := os.Open(gitignorePath); err == nil {
@@ -605,7 +964,7 @@ func cmdStart(args []string) {
 	repoDir := fs.String("repo", "", "path to git repo (default: .)")
 	dataDir := fs.String("data", "", "path to data directory (default: ./.slot-machine)")
 	port := fs.Int("port", 0, "API listen port (default: config api_port or 9100)")
-	noProxy := fs.Bool("no-proxy", false, "skip proxy configuration")
+	_ = fs.Bool("no-proxy", false, "ignored (kept for backward compatibility)")
 	fs.Parse(args)
 
 	cwd, _ := os.Getwd()
@@ -620,7 +979,6 @@ func cmdStart(args []string) {
 		*dataDir = filepath.Join(cwd, ".slot-machine")
 	}
 
-	// Load config.
 	cfgData, err := os.ReadFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot read %s\n", *configPath)
@@ -633,7 +991,6 @@ func cmdStart(args []string) {
 		os.Exit(1)
 	}
 
-	// Resolve API port: flag > config > 9100.
 	apiPort := 9100
 	if cfg.APIPort != 0 {
 		apiPort = cfg.APIPort
@@ -648,32 +1005,45 @@ func cmdStart(args []string) {
 		os.Exit(1)
 	}
 
-	// Create data dir.
 	os.MkdirAll(*dataDir, 0755)
 
-	o := &orchestrator{
-		cfg:     cfg,
-		repoDir: absRepo,
-		dataDir: *dataDir,
-		noProxy: *noProxy,
-		slots:   make(map[string]*slot),
+	appProxyAddr := ""
+	if cfg.Port != 0 {
+		appProxyAddr = fmt.Sprintf(":%d", cfg.Port)
+	}
+	intProxyAddr := ""
+	if cfg.InternalPort != 0 && cfg.InternalPort != cfg.Port {
+		intProxyAddr = fmt.Sprintf(":%d", cfg.InternalPort)
 	}
 
-	addr := fmt.Sprintf(":%d", apiPort)
-	srv := &http.Server{Addr: addr, Handler: o}
+	o := &orchestrator{
+		cfg:      cfg,
+		repoDir:  absRepo,
+		dataDir:  *dataDir,
+		appProxy: newDynamicProxy(appProxyAddr),
+		intProxy: newDynamicProxy(intProxyAddr),
+	}
 
-	// Drain managed processes on SIGTERM/SIGINT.
+	// Recover state from symlinks.
+	o.recoverState()
+
+	// API server.
+	apiAddr := fmt.Sprintf(":%d", apiPort)
+	apiSrv := &http.Server{Addr: apiAddr, Handler: o}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-sigCh
 		fmt.Println("\nshutting down...")
 		o.drainAll()
-		srv.Shutdown(context.Background())
+		o.appProxy.shutdown()
+		o.intProxy.shutdown()
+		apiSrv.Shutdown(context.Background())
 	}()
 
-	fmt.Printf("slot-machine listening on %s\n", addr)
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	fmt.Printf("slot-machine listening on %s\n", apiAddr)
+	if err := apiSrv.ListenAndServe(); err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "listen: %v\n", err)
 		os.Exit(1)
 	}
@@ -716,7 +1086,7 @@ func cmdDeploy(args []string) {
 	json.NewDecoder(resp.Body).Decode(&dr)
 
 	if dr.Success {
-		fmt.Printf("deployed %s to slot %s\n", shortHash(dr.Commit), dr.Slot)
+		fmt.Printf("deployed %s to %s\n", shortHash(dr.Commit), dr.Slot)
 	} else {
 		fmt.Fprintf(os.Stderr, "deploy failed: %s\n", dr.Error)
 		os.Exit(1)
@@ -744,7 +1114,7 @@ func cmdRollback() {
 	json.NewDecoder(resp.Body).Decode(&rr)
 
 	if rr.Success {
-		fmt.Printf("rolled back to %s (slot %s)\n", shortHash(rr.Commit), rr.Slot)
+		fmt.Printf("rolled back to %s (%s)\n", shortHash(rr.Commit), rr.Slot)
 	} else {
 		fmt.Fprintf(os.Stderr, "rollback failed: %s\n", rr.Error)
 		os.Exit(1)
@@ -772,9 +1142,12 @@ func cmdStatus() {
 		healthy = "yes"
 	}
 
-	fmt.Printf("live:     slot %s  %s  healthy=%s\n", sr.LiveSlot, sr.LiveCommit, healthy)
+	fmt.Printf("live:     %s  %s  healthy=%s\n", sr.LiveSlot, sr.LiveCommit, healthy)
 	if sr.PreviousSlot != "" {
-		fmt.Printf("previous: slot %s  %s\n", sr.PreviousSlot, sr.PreviousCommit)
+		fmt.Printf("previous: %s  %s\n", sr.PreviousSlot, sr.PreviousCommit)
+	}
+	if sr.StagingDir != "" {
+		fmt.Printf("staging:  %s\n", sr.StagingDir)
 	}
 	if sr.LastDeployTime != "" {
 		fmt.Printf("last deploy: %s\n", sr.LastDeployTime)
@@ -788,7 +1161,6 @@ func shortHash(s string) string {
 	return s
 }
 
-// readAPIPort reads slot-machine.json from cwd to get the api_port.
 func readAPIPort() int {
 	cwd, _ := os.Getwd()
 	data, err := os.ReadFile(filepath.Join(cwd, "slot-machine.json"))
