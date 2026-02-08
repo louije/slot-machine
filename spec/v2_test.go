@@ -420,3 +420,55 @@ func TestRollbackThenDeploy(t *testing.T) {
 		t.Fatalf("after post-rollback deploy: expected live=%s, got %s", repo.CommitC, st.LiveCommit)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test 25: Re-deploy same commit
+// ---------------------------------------------------------------------------
+//
+// Deploying the same commit that is already live should succeed and use a
+// proper hash-based slot name (not "slot-staging").
+
+func TestRedeploySameCommit(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	_ = orch
+
+	// Deploy A, then B.
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy A failed")
+	}
+	dr, _ = deploy(t, apiPort, repo.CommitB)
+	if !dr.Success {
+		t.Fatal("deploy B failed")
+	}
+
+	// Re-deploy B (same commit as live).
+	dr, _ = deploy(t, apiPort, repo.CommitB)
+	if !dr.Success {
+		t.Fatal("re-deploy B failed")
+	}
+
+	expectedSlot := fmt.Sprintf("slot-%s", repo.CommitB[:8])
+	if dr.Slot != expectedSlot {
+		t.Fatalf("re-deploy slot = %q, want %q (should not be slot-staging)", dr.Slot, expectedSlot)
+	}
+
+	st := status(t, apiPort)
+	if st.LiveCommit != repo.CommitB {
+		t.Fatalf("expected live=%s, got %s", repo.CommitB, st.LiveCommit)
+	}
+	if st.LiveSlot != expectedSlot {
+		t.Fatalf("expected live_slot=%s, got %s", expectedSlot, st.LiveSlot)
+	}
+}

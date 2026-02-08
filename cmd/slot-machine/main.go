@@ -313,6 +313,14 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 	}
 
 	// Rename staging → slot-<hash>.
+	// If the target already exists (re-deploy same commit), move it aside first.
+	// The old process keeps running fine — Unix doesn't invalidate open file handles on rename.
+	drainingDir := ""
+	if _, err := os.Stat(slotDir); err == nil {
+		drainingDir = slotDir + ".draining"
+		os.RemoveAll(drainingDir)
+		os.Rename(slotDir, drainingDir)
+	}
 	if err := o.promoteStaging(stagingDir, slotDir); err != nil {
 		// Non-fatal: process is running from stagingDir, just use that path.
 		slotDir = stagingDir
@@ -339,6 +347,9 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 	// Drain old live (it was still serving until proxy switch above).
 	if oldLive != nil {
 		o.drain(oldLive)
+	}
+	if drainingDir != "" {
+		os.RemoveAll(drainingDir)
 	}
 
 	// Update symlinks.
