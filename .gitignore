@@ -1,3 +1,4 @@
 .DS_Store
 spec/testapp/testapp
+spec/testagent/testagent
 /slot-machine
