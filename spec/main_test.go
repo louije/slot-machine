@@ -38,6 +38,15 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	// Build testagent if not already present.
+	testagentPath := filepath.Join(root, "spec", "testagent", "testagent")
+	if _, err := os.Stat(testagentPath); err != nil {
+		if err := goBuild(root, testagentPath, "./spec/testagent/"); err != nil {
+			fmt.Fprintf(os.Stderr, "building testagent: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	os.Exit(m.Run())
 }
 

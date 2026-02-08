@@ -478,6 +478,65 @@ func httpGet(t *testing.T, url string) (int, string) {
 	return resp.StatusCode, string(body)
 }
 
+// testagentBinary returns the absolute path to the compiled testagent binary.
+func testagentBinary(t *testing.T) string {
+	t.Helper()
+
+	candidates := []string{
+		"testagent/testagent",
+		"spec/testagent/testagent",
+	}
+	for _, c := range candidates {
+		abs, err := filepath.Abs(c)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(abs); err == nil {
+			return abs
+		}
+	}
+	t.Fatal("testagent binary not found — run: go build -o spec/testagent/testagent ./spec/testagent/")
+	return ""
+}
+
+// startOrchestratorWithAgent launches the orchestrator with the agent binary
+// available via SLOT_MACHINE_AGENT_BIN env var. Used for agent/deploy-through tests.
+func startOrchestratorWithAgent(t *testing.T, binary, contractPath, repoDir string, apiPort int, agentBin string) *Orchestrator {
+	t.Helper()
+
+	dataDir := t.TempDir()
+
+	cmd := exec.Command(binary,
+		"start",
+		"--config", contractPath,
+		"--repo", repoDir,
+		"--data", dataDir,
+		"--port", fmt.Sprintf("%d", apiPort),
+		"--no-proxy",
+	)
+	cmd.Env = append(os.Environ(), "SLOT_MACHINE_AGENT_BIN="+agentBin)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting orchestrator: %v", err)
+	}
+
+	orch := &Orchestrator{
+		Cmd:     cmd,
+		APIPort: apiPort,
+		DataDir: dataDir,
+	}
+
+	t.Cleanup(func() {
+		stopOrchestrator(t, orch)
+	})
+
+	waitForHealth(t, apiPort, 5*time.Second)
+
+	return orch
+}
+
 // httpPost sends a POST to the given URL and returns the status code.
 func httpPost(t *testing.T, url string) int {
 	t.Helper()
