@@ -198,6 +198,22 @@ func TestReadStartScript(t *testing.T) {
 	})
 }
 
+func TestBuildEnvIncludesSlotMachine(t *testing.T) {
+	t.Parallel()
+	o := &orchestrator{cfg: config{}}
+	env := o.buildEnv(3000, 3900)
+	found := false
+	for _, e := range env {
+		if e == "SLOT_MACHINE=1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected SLOT_MACHINE=1 in env")
+	}
+}
+
 func TestWriteJSON(t *testing.T) {
 	t.Parallel()
 	w := httptest.NewRecorder()

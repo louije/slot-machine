@@ -462,6 +462,43 @@ func TestEnvFilePassedToApp(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 15b: SLOT_MACHINE env var is set
+// ---------------------------------------------------------------------------
+
+func TestSlotMachineEnvVar(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	_ = orch
+
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy failed")
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/env?key=SLOT_MACHINE", intPort))
+	if err != nil {
+		t.Fatalf("GET /env: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if string(body) != "1" {
+		t.Fatalf("expected SLOT_MACHINE=1, got: %q", string(body))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test 16: setup_command runs before start
 // ---------------------------------------------------------------------------
 

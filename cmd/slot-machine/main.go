@@ -471,6 +471,7 @@ func (o *orchestrator) buildEnv(appPort, intPort int) []string {
 		}
 	}
 	env = append(env,
+		"SLOT_MACHINE=1",
 		fmt.Sprintf("PORT=%d", appPort),
 		fmt.Sprintf("INTERNAL_PORT=%d", intPort),
 	)
