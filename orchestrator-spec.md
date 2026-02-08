@@ -1,6 +1,6 @@
 # Orchestrator Spec
 
-The orchestrator is a process that manages blue-green deploys on a single machine. It doesn't know about agents, AI, migrations, or chat UIs. It knows about slots, processes, health checks, and a proxy. Everything else is layered on top by whatever calls `POST /deploy` with a commit hash.
+The orchestrator is a process that manages deploys on a single machine. Its core knows about slots, processes, health checks, and a proxy. The agent service and chat UI are built on top — see [agent.md](agent.md).
 
 This pattern doesn't exist as a standalone tool. Cloud-native orchestration (Kubernetes, ECS) handles it at scale. On a single machine, people reach for pm2 or a shell script. The middle ground — a proper spec with a validation suite that anyone can implement — is the gap.
 

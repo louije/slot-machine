@@ -6,6 +6,7 @@ An architecture for web applications that embed a coding agent capable of modify
 
 See also:
 - [Orchestrator Spec](orchestrator-spec.md) — the minimal, reusable interface to build against
+- [Agent & Chat](agent.md) — the agent service and chat UI embedded in slot-machine
 - [Migration Policy](migration-policy.md) — how database schema changes are handled safely
 
 ---
@@ -20,11 +21,11 @@ There is no build step. The app runs directly from source. Server restarts may b
 
 ### Reverse Proxy
 
-A shared proxy (nginx, Caddy) that routes incoming traffic to the currently live port for each app. The orchestrator updates the proxy configuration on each successful swap. This is the only shared infrastructure across apps.
+Each orchestrator includes a built-in reverse proxy that routes traffic to the live slot's dynamic port. The proxy also intercepts `/chat` and `/agent/*` paths to serve the agent UI and API — see [Agent & Chat](agent.md). An external proxy (Caddy, nginx) sits in front if needed for TLS and multi-app routing, but is not required for single-app setups.
 
 ### Orchestrator (one per app)
 
-A minimal, long-lived process that manages the deploy lifecycle for a single app. It owns the proxy routing for its app, the lifecycle of both deploy slots, health checking, rollback, and Git operations. The agent communicates with it through a constrained API — it never manipulates processes or the proxy directly.
+A long-lived process that manages the deploy lifecycle for a single app. It owns the reverse proxy, the lifecycle of three deploy slots (live, prev, staging), health checking, rollback, and the agent service. The agent communicates with it through a constrained API — it never manipulates processes or the proxy directly.
 
 The orchestrator exposes a small API:
 
@@ -38,13 +39,19 @@ See [Orchestrator Spec](orchestrator-spec.md) for the full interface definition 
 
 ### Deploy Slots
 
-Two directories on disk, alternating blue-green style: `deploy-a/` and `deploy-b/`. Each is a complete working copy of the app tied to a specific Git commit. The orchestrator writes to the inactive slot and swaps on successful promotion. The previously live slot is kept intact for fast rollback.
+Three roles, each a directory on disk named by commit hash:
 
-The two directories exist so that the old instance can keep serving traffic while the new one boots. This is not an archival strategy — Git is the archive. The second slot is just the fast escape hatch for instant rollback.
+- **live** (`slot-a3f2b1c4`) — serving traffic through the reverse proxy
+- **prev** (`slot-7c36e8d2`) — the previous deploy, ready for instant rollback
+- **staging** (`slot-staging`) — a workspace for the next deploy
+
+On promotion, staging is renamed to its commit hash, the old live becomes prev, and the old prev is garbage collected. A new staging is created as a CoW clone (APFS `cp -c`) of the promoted slot — so `node_modules` and build artifacts carry over instantly. State is persisted as symlinks (`live` → `slot-7c36...`, `prev` → `slot-a3f2...`), so the orchestrator recovers after restart.
 
 ### Coding Agent
 
-The agent writes code to the inactive deploy slot, commits to the `machine` branch, and requests a deploy through the orchestrator API. It is responsible for pulling and merging the human branch before starting work. It has no direct access to process management, the proxy, or the orchestrator's own code.
+The agent is a Claude Code session managed by slot-machine itself — see [Agent & Chat](agent.md). It works in the staging slot, commits to the `machine` branch, and triggers deploys through an internal call. It is responsible for pulling and merging the human branch before starting work. It has no direct access to process management or the proxy — deploys go through the same promotion pipeline as any other deploy.
+
+The agent process is a child of slot-machine, not the app. This means it survives app deploys: when slot-machine swaps traffic to a new slot and drains the old app process, the agent keeps running. The chat UI's SSE connection goes through the reverse proxy, which also stays up during deploys.
 
 ### GitHub
 
@@ -55,14 +62,14 @@ The remote source of truth. Human developers work on `main`. The agent's commits
 Both agent-initiated and human-initiated deploys follow the same path. The orchestrator does not distinguish between sources — it receives a commit and runs the same promotion sequence.
 
 ```
-1. Write files to inactive slot
-2. Git commit (captures intent)
-3. Pre-commit gate (secrets, diff size, protected paths)
-4. Boot new instance on staging port
-5. Deep health check
-   ├─ HEALTHY:   6a. Swap proxy → 7a. Drain & stop old instance
-   │             8. Push to GitHub → 9. Update deploy status
-   └─ UNHEALTHY: 6b. Kill failed instance → 7b. Log failure, alert, no swap
+1. Checkout commit in staging slot
+2. Run setup command (install deps)
+3. Start new process on dynamic port
+4. Health check (old process still serving)
+   ├─ HEALTHY:   5a. Switch proxy to new slot
+   │             6a. Drain old process → 7a. Update symlinks
+   │             8a. GC old prev slot → 9a. Create new staging (CoW clone)
+   └─ UNHEALTHY: 5b. Kill new process → 6b. Log failure, no swap
 ```
 
 The commit happens before the health check, not after. This captures intent: if the health check fails, the commit remains in the branch as a record of a failed attempt, which is useful for debugging. The orchestrator tags which commit is actually live separately.
@@ -173,19 +180,11 @@ The realistic threat model isn't a sophisticated attacker — it's the agent acc
 
 ## 8. Agent Lifecycle
 
-The agent is triggered by a chat UI in the app. A user sends a message, the app spawns or calls the agent, and the agent does its work. This makes the agent a subprocess of the app — but introduces a lifecycle problem.
+The agent is managed by slot-machine itself, not the app. See [Agent & Chat](agent.md) for the full design.
 
-### The swap problem
+The chat UI is served through slot-machine's reverse proxy. The agent process is a child of slot-machine. When a deploy swaps app processes, the agent and the chat connection are unaffected — they're on the orchestrator side of the boundary, not the app side.
 
-The app in slot A spawns the agent. The agent writes to slot B, calls deploy, the orchestrator swaps traffic to slot B, drains and stops slot A — killing the agent that initiated the whole thing.
-
-### Solution: detached agent process
-
-The agent process must not be a direct child of the app's server process. The app spawns it as a **detached background process** that isn't tied to the app's lifecycle. The user gets updates via polling or websocket. When the app swaps, the new slot picks up the connection (or the client reconnects). The orchestrator's drain logic knows: stop accepting requests, wait for in-flight requests, but **don't touch the agent process** — it finishes on its own.
-
-### Alternative: orchestrator-managed agent
-
-The app could forward the task to the orchestrator, which spawns the agent itself — since the orchestrator is the one thing that survives deploys. This keeps the lifecycle clean but couples the orchestrator to the agent's existence, violating the "keep the orchestrator minimal" principle. Rejected for v1, but worth revisiting if the detached-process approach proves fragile.
+This resolves the swap problem described in earlier drafts: the agent no longer dies when the app it modified gets promoted. The browser's SSE connection goes through the proxy, which stays up. The Claude CLI process is a child of slot-machine, which stays up. Only the app process swaps.
 
 ## 9. Multi-App Topology
 
@@ -231,7 +230,7 @@ Containers are not part of the v1 architecture, but the orchestrator pattern sta
 | **Agent modifies integration points** — changes the port, health endpoint, or orchestrator API calls | High | App contract file is outside the agent's writable scope. Orchestrator injects config rather than reading it from app code. |
 | **Secret exposure** — agent accidentally commits credentials | High | Secrets injected by orchestrator from external store. Pre-commit gate scans diffs for secret patterns. Agent has no direct access to secret store. |
 | **Agent calls internal endpoints** — agent-written code triggers migrations or corrupts health checks | High | Internal endpoints on localhost-only port. Optional Unix domain socket with restricted permissions. |
-| **Agent killed mid-task by deploy swap** | Medium | Agent runs as detached process. Orchestrator's drain logic excludes the agent. |
+| **Agent killed mid-task by deploy swap** | Resolved | Agent is a child of slot-machine, not the app. Survives app deploys. See [agent.md](agent.md). |
 | **Stateful drift** — in-memory sessions, caches, websocket connections lost on swap | Medium | App constraint: externalize all state. Connection draining before stopping old instance. |
 | **Cascading failed deploys** — flawed health check causes valid deploys to fail repeatedly | Medium | Orchestrator tracks consecutive failures and alerts after a threshold. Manual override available. |
 | **Disk pressure** — deploy directories and git history accumulate | Medium | Only current and previous slots kept. Stale slots cleaned up. Git gc runs periodically. Agent commits squashed on merge. |
