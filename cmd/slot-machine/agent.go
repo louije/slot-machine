@@ -2,25 +2,16 @@ package main
 
 import (
 	"bufio"
-	"crypto/hmac"
-	"crypto/sha256"
-	_ "embed"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
-
-//go:embed chat.html
-var chatHTML string
 
 type agentService struct {
 	store      *agentStore
@@ -43,56 +34,11 @@ type agentSession struct {
 
 type agentEvent struct {
 	ID   int64  // message ID (for SSE reconnection)
-	Type string // SSE event type: system, assistant, done
+	Type string // SSE event type: system, assistant, tool_use, tool_result, done
 	Data string // SSE data (JSON)
 }
 
 var titlePattern = regexp.MustCompile(`\[\[TITLE:\s*(.+?)\]\]`)
-
-func (a *agentService) extractUser(r *http.Request) string {
-	header := r.Header.Get("X-SlotMachine-User")
-	switch a.authMode {
-	case "hmac":
-		idx := strings.LastIndex(header, ":")
-		if idx < 1 {
-			return ""
-		}
-		user, sig := header[:idx], header[idx+1:]
-		mac := hmac.New(sha256.New, []byte(a.authSecret))
-		mac.Write([]byte(user))
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if !hmac.Equal([]byte(sig), []byte(expected)) {
-			return ""
-		}
-		return user
-	case "trusted":
-		return header
-	default:
-		return ""
-	}
-}
-
-func (a *agentService) buildSystemPrompt() string {
-	var b strings.Builder
-	b.WriteString("You are an AI assistant embedded in a web application via slot-machine.\n")
-	b.WriteString("You are working in the application's source code directory.\n")
-
-	agentMD, err := os.ReadFile(filepath.Join(a.stagingDir, "agent.md"))
-	if err == nil && len(agentMD) > 0 {
-		b.WriteString("\n")
-		b.Write(agentMD)
-		if agentMD[len(agentMD)-1] != '\n' {
-			b.WriteString("\n")
-		}
-	}
-
-	b.WriteString("\n## Conversation titling\n")
-	b.WriteString("Include a conversation title in your responses using this format on its own line:\n")
-	b.WriteString("[[TITLE: short descriptive title]]\n")
-	b.WriteString("Include this in your first response. You may include it again to update the title if the topic changes.\n")
-
-	return b.String()
-}
 
 func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/chat" {
@@ -150,34 +96,6 @@ func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
-}
-
-func (a *agentService) handleChat(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(chatHTML))
-}
-
-func (a *agentService) handleChatConfig(w http.ResponseWriter, r *http.Request) {
-	title := a.chatTitle
-	if title == "" {
-		title = "slot-machine"
-	}
-	writeJSON(w, 200, map[string]string{
-		"authMode":   a.authMode,
-		"authSecret": a.authSecret,
-		"chatTitle":  title,
-		"chatAccent": a.chatAccent,
-	})
-}
-
-func (a *agentService) handleChatCSS(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/css")
-	data, err := os.ReadFile(filepath.Join(a.stagingDir, "chat.css"))
-	if err != nil {
-		w.WriteHeader(200)
-		return
-	}
-	w.Write(data)
 }
 
 func (a *agentService) handleListConversations(w http.ResponseWriter, r *http.Request) {
