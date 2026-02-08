@@ -513,6 +513,68 @@ func TestBuildSystemPrompt(t *testing.T) {
 	})
 }
 
+func TestChatConfigEndpoint(t *testing.T) {
+	t.Parallel()
+
+	t.Run("special characters in title", func(t *testing.T) {
+		a := &agentService{
+			authMode:   "none",
+			chatTitle:  "Lou's App",
+			chatAccent: "#ff0000",
+		}
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/chat/config", nil)
+		a.handleChatConfig(w, r)
+
+		body := w.Body.String()
+		if w.Code != 200 {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		// The title with an apostrophe must be valid JSON (no broken quotes).
+		if !strings.Contains(body, `Lou's App`) {
+			t.Fatalf("title not in response: %s", body)
+		}
+		if !strings.Contains(body, `"chatAccent":"#ff0000"`) {
+			t.Fatalf("accent not in response: %s", body)
+		}
+	})
+
+	t.Run("default title", func(t *testing.T) {
+		a := &agentService{authMode: "hmac", authSecret: "abc123"}
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/chat/config", nil)
+		a.handleChatConfig(w, r)
+
+		body := w.Body.String()
+		if !strings.Contains(body, `"chatTitle":"slot-machine"`) {
+			t.Fatalf("expected default title, got: %s", body)
+		}
+		if !strings.Contains(body, `"authMode":"hmac"`) {
+			t.Fatalf("expected authMode hmac, got: %s", body)
+		}
+		if !strings.Contains(body, `"authSecret":"abc123"`) {
+			t.Fatalf("expected authSecret, got: %s", body)
+		}
+	})
+}
+
+func TestChatServesStaticHTML(t *testing.T) {
+	t.Parallel()
+	a := &agentService{authMode: "none"}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/chat", nil)
+	a.handleChat(w, r)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "<!DOCTYPE html>") {
+		t.Fatal("missing DOCTYPE")
+	}
+	// Must NOT contain Go template syntax.
+	if strings.Contains(body, "{{") {
+		t.Fatal("chat.html still contains template syntax")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
 		findSubstring(s, substr))

@@ -58,7 +58,7 @@ func (p *dynamicProxy) shutdown() {
 
 func (p *dynamicProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// Intercept /agent/* and /chat — handled by slot-machine, not forwarded.
-	if p.intercept != nil && (strings.HasPrefix(r.URL.Path, "/agent/") || r.URL.Path == "/chat" || r.URL.Path == "/chat.css") {
+	if p.intercept != nil && (strings.HasPrefix(r.URL.Path, "/agent/") || r.URL.Path == "/chat" || strings.HasPrefix(r.URL.Path, "/chat/") || r.URL.Path == "/chat.css") {
 		p.intercept.ServeHTTP(w, r)
 		return
 	}

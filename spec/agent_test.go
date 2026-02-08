@@ -669,11 +669,22 @@ func TestChatPageServesFullHTML(t *testing.T) {
 		t.Fatal("/chat response missing CSS custom properties")
 	}
 
-	// Must have the auth mode injected.
-	if !strings.Contains(body, "authMode") {
-		t.Fatal("/chat response missing auth config injection")
+	// Must reference the config endpoint.
+	if !strings.Contains(body, "/chat/config") {
+		t.Fatal("/chat response missing /chat/config fetch")
 	}
 
-	// Content-Type should be text/html.
-	// (httpGet doesn't return headers, but the body check confirms it's HTML)
+	// Must NOT contain Go template syntax.
+	if strings.Contains(body, "{{") {
+		t.Fatal("/chat response contains Go template syntax")
+	}
+
+	// /chat/config must return valid JSON with auth config.
+	configCode, configBody := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/chat/config", appPort))
+	if configCode != 200 {
+		t.Fatalf("expected 200 for /chat/config, got %d", configCode)
+	}
+	if !strings.Contains(configBody, `"authMode"`) {
+		t.Fatalf("/chat/config missing authMode: %s", configBody)
+	}
 }

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<title>{{.ChatTitle}}</title>
+<title>slot-machine</title>
 <link rel="stylesheet" href="/chat.css">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -16,7 +16,7 @@
   --sm-text:#1a1a1a;
   --sm-text-secondary:#6b7280;
   --sm-border:#e5e7eb;
-  --sm-accent:{{if .ChatAccent}}{{.ChatAccent}}{{else}}#2563eb{{end}};
+  --sm-accent:#2563eb;
   --sm-accent-text:#ffffff;
   --sm-tool-bg:#f0f4ff;
   --sm-tool-border:#c7d2fe;
@@ -131,7 +131,7 @@ html,body{height:100%;overflow:hidden;font-family:var(--sm-font);font-size:var(-
 <div id="sm-app">
   <div id="sm-header">
     <button class="sm-icon-btn" id="sm-conv-btn" title="Conversations">&#9776;</button>
-    <h1 id="sm-title">{{.ChatTitle}}</h1>
+    <h1 id="sm-title">slot-machine</h1>
     <button class="sm-icon-btn" id="sm-settings-btn" title="Settings">&#9881;</button>
   </div>
   <div id="sm-messages"></div>
@@ -167,12 +167,8 @@ html,body{height:100%;overflow:hidden;font-family:var(--sm-font);font-size:var(-
 (function(){
 'use strict';
 
-// --- Config injected by server ---
-var SM_CONFIG = {
-  authMode: '{{.AuthMode}}',
-  authSecret: '{{.AuthSecret}}',
-  chatTitle: '{{.ChatTitle}}'
-};
+// --- Config fetched from server ---
+var SM_CONFIG = { authMode:'none', authSecret:'', chatTitle:'slot-machine', chatAccent:'' };
 
 // --- State ---
 var state = {
@@ -198,23 +194,21 @@ var $sysVis = document.getElementById('sm-sys-vis');
 var $fontSize = document.getElementById('sm-fontsize');
 
 // --- Auth ---
-var authReady = Promise.resolve();
-if (SM_CONFIG.authMode === 'hmac' && SM_CONFIG.authSecret) {
-  authReady = (async function() {
+async function setupAuth() {
+  if (SM_CONFIG.authMode === 'hmac' && SM_CONFIG.authSecret) {
     var user = localStorage.getItem('sm-user') || 'chat-user';
     var enc = new TextEncoder();
     var key = await crypto.subtle.importKey('raw', enc.encode(SM_CONFIG.authSecret), {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
     var sig = await crypto.subtle.sign('HMAC', key, enc.encode(user));
     var hex = Array.from(new Uint8Array(sig)).map(function(b){return b.toString(16).padStart(2,'0')}).join('');
     state.authHeader = user + ':' + hex;
-  })();
-} else if (SM_CONFIG.authMode === 'trusted') {
-  state.authHeader = localStorage.getItem('sm-user') || 'chat-user';
+  } else if (SM_CONFIG.authMode === 'trusted') {
+    state.authHeader = localStorage.getItem('sm-user') || 'chat-user';
+  }
 }
 
 // --- API ---
 async function api(method, path, body) {
-  await authReady;
   var opts = { method: method, headers: {} };
   if (state.authHeader) opts.headers['X-SlotMachine-User'] = state.authHeader;
   if (body !== undefined) {
@@ -634,17 +628,31 @@ function formatTime(iso) {
 
 // --- Init ---
 loadSettings();
-authReady.then(function(){
-  loadConversations().then(function(){
-    // Auto-load most recent conversation, or show empty.
-    var items = $convList.querySelectorAll('.sm-conv-item');
-    if (items.length > 0) {
-      switchConversation(items[0].dataset.convId);
-    } else {
-      showEmpty();
+(async function init() {
+  // Fetch config from server — title, accent, auth.
+  try {
+    var resp = await fetch('/chat/config');
+    var cfg = await resp.json();
+    Object.assign(SM_CONFIG, cfg);
+    if (cfg.chatTitle) {
+      $title.textContent = cfg.chatTitle;
+      document.title = cfg.chatTitle;
     }
-  });
-});
+    if (cfg.chatAccent) {
+      document.documentElement.style.setProperty('--sm-accent', cfg.chatAccent);
+    }
+  } catch(e) { console.error('failed to load config:', e); }
+
+  await setupAuth();
+
+  await loadConversations();
+  var items = $convList.querySelectorAll('.sm-conv-item');
+  if (items.length > 0) {
+    switchConversation(items[0].dataset.convId);
+  } else {
+    showEmpty();
+  }
+})();
 
 })();
 </script>

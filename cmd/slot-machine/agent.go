@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"io"
 	"net/http"
 	"os"
@@ -22,15 +21,6 @@ import (
 
 //go:embed chat.html
 var chatHTML string
-
-var chatTmpl = template.Must(template.New("chat").Parse(chatHTML))
-
-type chatTemplateData struct {
-	AuthMode   string
-	AuthSecret string
-	ChatTitle  string
-	ChatAccent string
-}
 
 type agentService struct {
 	store      *agentStore
@@ -113,6 +103,10 @@ func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.handleChatCSS(w, r)
 		return
 	}
+	if r.URL.Path == "/chat/config" {
+		a.handleChatConfig(w, r)
+		return
+	}
 
 	// Auth check for /agent/* paths in hmac mode.
 	if strings.HasPrefix(r.URL.Path, "/agent/") && a.authMode == "hmac" {
@@ -159,16 +153,20 @@ func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *agentService) handleChat(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(chatHTML))
+}
+
+func (a *agentService) handleChatConfig(w http.ResponseWriter, r *http.Request) {
 	title := a.chatTitle
 	if title == "" {
 		title = "slot-machine"
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	chatTmpl.Execute(w, chatTemplateData{
-		AuthMode:   a.authMode,
-		AuthSecret: a.authSecret,
-		ChatTitle:  title,
-		ChatAccent: a.chatAccent,
+	writeJSON(w, 200, map[string]string{
+		"authMode":   a.authMode,
+		"authSecret": a.authSecret,
+		"chatTitle":  title,
+		"chatAccent": a.chatAccent,
 	})
 }
 
