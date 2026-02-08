@@ -81,14 +81,15 @@ type orchestrator struct {
 // ---------------------------------------------------------------------------
 
 type dynamicProxy struct {
-	mu   sync.RWMutex
-	port int
-	addr string
-	srv  *http.Server
+	mu        sync.RWMutex
+	port      int
+	addr      string
+	srv       *http.Server
+	intercept http.Handler // handles /agent/* and /chat before forwarding
 }
 
-func newDynamicProxy(addr string) *dynamicProxy {
-	return &dynamicProxy{addr: addr}
+func newDynamicProxy(addr string, intercept http.Handler) *dynamicProxy {
+	return &dynamicProxy{addr: addr, intercept: intercept}
 }
 
 func (p *dynamicProxy) setTarget(port int) {
@@ -126,6 +127,12 @@ func (p *dynamicProxy) shutdown() {
 }
 
 func (p *dynamicProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	// Intercept /agent/* and /chat — handled by slot-machine, not forwarded.
+	if p.intercept != nil && (strings.HasPrefix(r.URL.Path, "/agent/") || r.URL.Path == "/chat") {
+		p.intercept.ServeHTTP(w, r)
+		return
+	}
+
 	p.mu.RLock()
 	port := p.port
 	p.mu.RUnlock()
@@ -142,6 +149,248 @@ func (p *dynamicProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// ---------------------------------------------------------------------------
+// Agent service
+// ---------------------------------------------------------------------------
+
+type agentService struct {
+	mu            sync.Mutex
+	conversations map[string]*conversation
+	agentBin      string // path to claude CLI (or testagent for tests)
+	stagingDir    string // staging slot directory
+	envFunc       func() []string
+}
+
+type conversation struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	SessionID string    `json:"session_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	events    chan agentEvent
+	running   bool
+	done      chan struct{}
+}
+
+type agentEvent struct {
+	Type string // SSE event type: system, assistant, done
+	Data string // SSE data (JSON)
+}
+
+func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/chat" {
+		a.handleChat(w, r)
+		return
+	}
+
+	if r.URL.Path == "/agent/conversations" {
+		switch r.Method {
+		case "GET":
+			a.handleListConversations(w, r)
+		case "POST":
+			a.handleCreateConversation(w, r)
+		default:
+			http.Error(w, "method not allowed", 405)
+		}
+		return
+	}
+
+	// /agent/conversations/:id/messages or /agent/conversations/:id/stream
+	rest := strings.TrimPrefix(r.URL.Path, "/agent/conversations/")
+	if rest == r.URL.Path {
+		http.NotFound(w, r)
+		return
+	}
+	parts := strings.SplitN(rest, "/", 2)
+	convID := parts[0]
+	if len(parts) == 2 {
+		switch parts[1] {
+		case "messages":
+			a.handleSendMessage(w, r, convID)
+			return
+		case "stream":
+			a.handleStream(w, r, convID)
+			return
+		}
+	}
+	http.NotFound(w, r)
+}
+
+func (a *agentService) handleChat(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, `<!DOCTYPE html>
+<html><head><title>slot-machine</title></head>
+<body><div id="chat"></div></body>
+</html>`)
+}
+
+func (a *agentService) handleListConversations(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	list := make([]conversation, 0, len(a.conversations))
+	for _, c := range a.conversations {
+		list = append(list, *c)
+	}
+	writeJSON(w, 200, list)
+}
+
+func (a *agentService) handleCreateConversation(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	conv := &conversation{
+		ID:        fmt.Sprintf("conv-%d", time.Now().UnixNano()),
+		CreatedAt: time.Now(),
+	}
+	a.conversations[conv.ID] = conv
+	writeJSON(w, 200, conv)
+}
+
+func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request, convID string) {
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+
+	var msg struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, "bad request", 400)
+		return
+	}
+
+	a.mu.Lock()
+	conv, ok := a.conversations[convID]
+	if !ok {
+		a.mu.Unlock()
+		http.NotFound(w, r)
+		return
+	}
+	if conv.running {
+		a.mu.Unlock()
+		http.Error(w, "agent already running", 409)
+		return
+	}
+	conv.running = true
+	conv.events = make(chan agentEvent, 100)
+	conv.done = make(chan struct{})
+	a.mu.Unlock()
+
+	// Spawn agent process.
+	bin := a.agentBin
+	if bin == "" {
+		bin = "claude"
+	}
+
+	args := []string{
+		"--output-format", "stream-json",
+		"-p", msg.Content,
+	}
+	if conv.SessionID != "" {
+		args = append(args, "--resume", conv.SessionID)
+	}
+
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = a.stagingDir
+	if a.envFunc != nil {
+		cmd.Env = a.envFunc()
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		a.mu.Lock()
+		conv.running = false
+		a.mu.Unlock()
+		http.Error(w, "failed to create pipe", 500)
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		a.mu.Lock()
+		conv.running = false
+		a.mu.Unlock()
+		http.Error(w, "failed to start agent", 500)
+		return
+	}
+
+	go func() {
+		defer func() {
+			a.mu.Lock()
+			conv.running = false
+			a.mu.Unlock()
+			close(conv.done)
+			close(conv.events)
+		}()
+
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			var evt map[string]any
+			if json.Unmarshal([]byte(line), &evt) != nil {
+				continue
+			}
+
+			evtType, _ := evt["type"].(string)
+			switch evtType {
+			case "system":
+				if sub, _ := evt["subtype"].(string); sub == "init" {
+					if sid, ok := evt["session_id"].(string); ok {
+						a.mu.Lock()
+						conv.SessionID = sid
+						a.mu.Unlock()
+					}
+				}
+				conv.events <- agentEvent{Type: "system", Data: line}
+			case "assistant":
+				text, _ := evt["text"].(string)
+				data, _ := json.Marshal(map[string]string{"content": text})
+				conv.events <- agentEvent{Type: "assistant", Data: string(data)}
+			case "result":
+				conv.events <- agentEvent{Type: "done", Data: "{}"}
+			}
+		}
+		cmd.Wait()
+	}()
+
+	w.WriteHeader(200)
+}
+
+func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, convID string) {
+	a.mu.Lock()
+	conv, ok := a.conversations[convID]
+	a.mu.Unlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", 500)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(200)
+	flusher.Flush()
+
+	for {
+		select {
+		case evt, open := <-conv.events:
+			if !open {
+				return
+			}
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Type, evt.Data)
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,12 +1275,18 @@ func cmdStart(args []string) {
 		intProxyAddr = fmt.Sprintf(":%d", cfg.InternalPort)
 	}
 
+	agent := &agentService{
+		conversations: make(map[string]*conversation),
+		agentBin:      os.Getenv("SLOT_MACHINE_AGENT_BIN"),
+		stagingDir:    filepath.Join(*dataDir, "slot-staging"),
+	}
+
 	o := &orchestrator{
 		cfg:      cfg,
 		repoDir:  absRepo,
 		dataDir:  *dataDir,
-		appProxy: newDynamicProxy(appProxyAddr),
-		intProxy: newDynamicProxy(intProxyAddr),
+		appProxy: newDynamicProxy(appProxyAddr, agent),
+		intProxy: newDynamicProxy(intProxyAddr, nil),
 	}
 
 	// Recover state from symlinks.

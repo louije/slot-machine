@@ -231,7 +231,7 @@ func TestWriteJSON(t *testing.T) {
 
 func TestDynamicProxyNoTarget(t *testing.T) {
 	t.Parallel()
-	p := newDynamicProxy("")
+	p := newDynamicProxy("", nil)
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
 	p.serveHTTP(w, r)
@@ -254,7 +254,7 @@ func TestDynamicProxyWithTarget(t *testing.T) {
 	var port int
 	fmt.Sscanf(portStr, "%d", &port)
 
-	p := newDynamicProxy("")
+	p := newDynamicProxy("", nil)
 	p.port = port // set directly since addr="" means no listener management
 
 	w := httptest.NewRecorder()
@@ -273,7 +273,7 @@ func TestDynamicProxyLifecycle(t *testing.T) {
 
 	port, _ := findFreePort()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	p := newDynamicProxy(addr)
+	p := newDynamicProxy(addr, nil)
 
 	// No target — no listener.
 	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
@@ -319,8 +319,8 @@ func TestOrchestratorServeHTTP(t *testing.T) {
 	t.Parallel()
 
 	o := &orchestrator{
-		appProxy: newDynamicProxy(""),
-		intProxy: newDynamicProxy(""),
+		appProxy: newDynamicProxy("", nil),
+		intProxy: newDynamicProxy("", nil),
 	}
 
 	t.Run("GET /", func(t *testing.T) {
@@ -365,8 +365,8 @@ func TestStatusHandler(t *testing.T) {
 
 	now := time.Now()
 	o := &orchestrator{
-		appProxy: newDynamicProxy(""),
-		intProxy: newDynamicProxy(""),
+		appProxy: newDynamicProxy("", nil),
+		intProxy: newDynamicProxy("", nil),
 		liveSlot: &slot{
 			name:   "slot-abc12345",
 			commit: "abc1234567890",

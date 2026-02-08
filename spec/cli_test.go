@@ -215,7 +215,13 @@ func TestDeployNoRunningDaemon(t *testing.T) {
 
 	// Also need a git repo for HEAD resolution.
 	exec.Command("git", "init", dir).Run()
-	exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "init").Run()
+	exec.Command("git", "-C", dir, "config", "commit.gpgsign", "false").Run()
+	gitCommit := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "init")
+	gitCommit.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test",
+	)
+	gitCommit.Run()
 
 	_, stderr, code := runBinary(t, dir, "deploy")
 	if code == 0 {
