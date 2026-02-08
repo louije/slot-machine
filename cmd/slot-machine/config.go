@@ -10,5 +10,7 @@ type config struct {
 	DrainTimeoutMs  int    `json:"drain_timeout_ms"`
 	EnvFile         string `json:"env_file"`
 	APIPort         int    `json:"api_port"`
-	AgentAuth       string `json:"agent_auth"` // "hmac" (default), "trusted", "none"
+	AgentAuth       string `json:"agent_auth"`   // "hmac" (default), "trusted", "none"
+	ChatTitle       string `json:"chat_title"`   // header title (default: "slot-machine")
+	ChatAccent      string `json:"chat_accent"`  // CSS accent color (default: "#2563eb")
 }

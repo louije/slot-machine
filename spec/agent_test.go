@@ -487,3 +487,193 @@ func TestHMACAuthRejectsUnauthenticated(t *testing.T) {
 		t.Fatalf("expected HTML for /chat, got: %s", body)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test 32: Tool events forwarded through SSE
+// ---------------------------------------------------------------------------
+//
+// The testagent emits tool_use and tool_result events. The orchestrator should
+// forward them as SSE events with the correct types and data structure.
+
+func TestToolEventsForwardedThroughSSE(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+	agentBin := testagentBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin)
+	_ = orch
+
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy failed")
+	}
+
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", appPort)
+
+	// Create conversation and send message.
+	resp, err := http.Post(proxyURL+"/agent/conversations", "application/json", nil)
+	if err != nil {
+		t.Fatalf("creating conversation: %v", err)
+	}
+	var conv struct{ ID string `json:"id"` }
+	json.NewDecoder(resp.Body).Decode(&conv)
+	resp.Body.Close()
+
+	msgBody, _ := json.Marshal(map[string]string{"content": "test tool events"})
+	resp, err = http.Post(
+		fmt.Sprintf("%s/agent/conversations/%s/messages", proxyURL, conv.ID),
+		"application/json",
+		bytes.NewReader(msgBody),
+	)
+	if err != nil {
+		t.Fatalf("sending message: %v", err)
+	}
+	resp.Body.Close()
+
+	// Open SSE stream.
+	sseClient := &http.Client{Timeout: 0}
+	sseResp, err := sseClient.Get(fmt.Sprintf("%s/agent/conversations/%s/stream", proxyURL, conv.ID))
+	if err != nil {
+		t.Fatalf("opening SSE stream: %v", err)
+	}
+	defer sseResp.Body.Close()
+
+	type sseEvent struct {
+		eventType string
+		data      string
+	}
+	events := make(chan sseEvent, 100)
+	go func() {
+		scanner := bufio.NewScanner(sseResp.Body)
+		var currentEvent string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "event:") {
+				currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			} else if strings.HasPrefix(line, "data:") {
+				events <- sseEvent{
+					eventType: currentEvent,
+					data:      strings.TrimSpace(strings.TrimPrefix(line, "data:")),
+				}
+			}
+		}
+		close(events)
+	}()
+
+	// Collect events until done or timeout.
+	deadline := time.After(20 * time.Second)
+	var toolUseEvents, toolResultEvents []string
+	done := false
+	for !done {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				done = true
+				break
+			}
+			switch ev.eventType {
+			case "tool_use":
+				toolUseEvents = append(toolUseEvents, ev.data)
+			case "tool_result":
+				toolResultEvents = append(toolResultEvents, ev.data)
+			case "done":
+				done = true
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for SSE events")
+		}
+	}
+
+	// Verify we got at least one tool_use and one tool_result.
+	if len(toolUseEvents) == 0 {
+		t.Fatal("expected at least one tool_use SSE event")
+	}
+	if len(toolResultEvents) == 0 {
+		t.Fatal("expected at least one tool_result SSE event")
+	}
+
+	// Verify tool_use data has "tool" field.
+	var tu map[string]string
+	if err := json.Unmarshal([]byte(toolUseEvents[0]), &tu); err != nil {
+		t.Fatalf("parsing tool_use data: %v", err)
+	}
+	if tu["tool"] == "" {
+		t.Fatal("tool_use event missing 'tool' field")
+	}
+	if tu["id"] == "" {
+		t.Fatal("tool_use event missing 'id' field")
+	}
+
+	// Verify tool_result data has "output" field.
+	var tr map[string]string
+	if err := json.Unmarshal([]byte(toolResultEvents[0]), &tr); err != nil {
+		t.Fatalf("parsing tool_result data: %v", err)
+	}
+	if tr["output"] == "" {
+		t.Fatal("tool_result event missing 'output' field")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 33: Chat page serves full HTML with template data
+// ---------------------------------------------------------------------------
+//
+// GET /chat through the proxy should return a full HTML page with viewport
+// meta, CSS custom properties, and injected auth config.
+
+func TestChatPageServesFullHTML(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	_ = orch
+
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy failed")
+	}
+
+	code, body := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/chat", appPort))
+	if code != 200 {
+		t.Fatalf("expected 200 for /chat, got %d", code)
+	}
+
+	// Must be a full HTML document.
+	if !strings.Contains(body, "<!DOCTYPE html>") {
+		t.Fatal("/chat response missing <!DOCTYPE html>")
+	}
+
+	// Must have viewport meta for mobile.
+	if !strings.Contains(body, "viewport") {
+		t.Fatal("/chat response missing viewport meta tag")
+	}
+
+	// Must have CSS custom properties.
+	if !strings.Contains(body, "--sm-bg") {
+		t.Fatal("/chat response missing CSS custom properties")
+	}
+
+	// Must have the auth mode injected.
+	if !strings.Contains(body, "authMode") {
+		t.Fatal("/chat response missing auth config injection")
+	}
+
+	// Content-Type should be text/html.
+	// (httpGet doesn't return headers, but the body check confirms it's HTML)
+}

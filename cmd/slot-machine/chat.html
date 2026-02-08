@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>{{.ChatTitle}}</title>
+<link rel="stylesheet" href="/chat.css">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --sm-bg:#ffffff;
+  --sm-bg-secondary:#f8f9fa;
+  --sm-bg-tertiary:#f0f0f0;
+  --sm-text:#1a1a1a;
+  --sm-text-secondary:#6b7280;
+  --sm-border:#e5e7eb;
+  --sm-accent:{{if .ChatAccent}}{{.ChatAccent}}{{else}}#2563eb{{end}};
+  --sm-accent-text:#ffffff;
+  --sm-tool-bg:#f0f4ff;
+  --sm-tool-border:#c7d2fe;
+  --sm-tool-text:#3730a3;
+  --sm-error:#dc2626;
+  --sm-font-size:15px;
+  --sm-font:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --sm-font-mono:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace;
+  --sm-radius:10px;
+  --sm-max-width:800px;
+  --sm-safe-top:env(safe-area-inset-top,0px);
+  --sm-safe-bottom:env(safe-area-inset-bottom,0px);
+}
+[data-theme="dark"]{
+  --sm-bg:#0f0f0f;
+  --sm-bg-secondary:#1a1a1a;
+  --sm-bg-tertiary:#252525;
+  --sm-text:#e5e5e5;
+  --sm-text-secondary:#9ca3af;
+  --sm-border:#2d2d2d;
+  --sm-tool-bg:#1a1a2e;
+  --sm-tool-border:#2d2d5e;
+  --sm-tool-text:#a5b4fc;
+}
+@media(prefers-color-scheme:dark){
+  [data-theme="auto"]{
+    --sm-bg:#0f0f0f;
+    --sm-bg-secondary:#1a1a1a;
+    --sm-bg-tertiary:#252525;
+    --sm-text:#e5e5e5;
+    --sm-text-secondary:#9ca3af;
+    --sm-border:#2d2d2d;
+    --sm-tool-bg:#1a1a2e;
+    --sm-tool-border:#2d2d5e;
+    --sm-tool-text:#a5b4fc;
+  }
+}
+html,body{height:100%;overflow:hidden;font-family:var(--sm-font);font-size:var(--sm-font-size);color:var(--sm-text);background:var(--sm-bg)}
+#sm-app{display:flex;flex-direction:column;height:100dvh;max-width:var(--sm-max-width);margin:0 auto;position:relative}
+#sm-header{display:flex;align-items:center;gap:8px;padding:10px 16px;padding-top:calc(10px + var(--sm-safe-top));border-bottom:1px solid var(--sm-border);background:var(--sm-bg);flex-shrink:0;z-index:10}
+#sm-header h1{font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sm-icon-btn{background:none;border:none;color:var(--sm-text-secondary);cursor:pointer;padding:6px;border-radius:6px;font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center}
+.sm-icon-btn:hover{background:var(--sm-bg-tertiary)}
+#sm-messages{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:16px}
+.sm-msg{margin-bottom:16px;max-width:100%}
+.sm-msg-role{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--sm-text-secondary);margin-bottom:4px}
+.sm-msg-role.sm-role-user{color:var(--sm-accent)}
+.sm-msg-content{line-height:1.6;word-wrap:break-word;overflow-wrap:break-word}
+.sm-msg-content p{margin-bottom:8px}
+.sm-msg-content p:last-child{margin-bottom:0}
+.sm-msg-content h1,.sm-msg-content h2,.sm-msg-content h3,.sm-msg-content h4{margin:12px 0 6px;font-weight:600}
+.sm-msg-content h1{font-size:1.4em}
+.sm-msg-content h2{font-size:1.2em}
+.sm-msg-content h3{font-size:1.1em}
+.sm-msg-content code{font-family:var(--sm-font-mono);font-size:0.88em;background:var(--sm-bg-tertiary);padding:2px 5px;border-radius:4px}
+.sm-msg-content pre{background:var(--sm-bg-tertiary);border:1px solid var(--sm-border);border-radius:var(--sm-radius);padding:12px;margin:8px 0;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.sm-msg-content pre code{background:none;padding:0;font-size:0.85em}
+.sm-msg-content a{color:var(--sm-accent);text-decoration:none}
+.sm-msg-content a:hover{text-decoration:underline}
+.sm-msg-content ul,.sm-msg-content ol{margin:6px 0;padding-left:24px}
+.sm-msg-content li{margin-bottom:4px}
+.sm-msg-content strong{font-weight:600}
+.sm-msg-content em{font-style:italic}
+.sm-tool{margin:8px 0;border:1px solid var(--sm-tool-border);border-radius:var(--sm-radius);background:var(--sm-tool-bg);overflow:hidden}
+.sm-tool-header{display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:pointer;font-size:13px;color:var(--sm-tool-text);font-weight:500;user-select:none}
+.sm-tool-header:hover{opacity:0.8}
+.sm-tool-icon{font-size:14px;width:18px;text-align:center;flex-shrink:0}
+.sm-tool-chevron{margin-left:auto;font-size:11px;transition:transform 0.15s}
+.sm-tool.sm-expanded .sm-tool-chevron{transform:rotate(90deg)}
+.sm-tool-body{display:none;padding:0 12px 10px;font-size:13px;font-family:var(--sm-font-mono);white-space:pre-wrap;word-break:break-all;color:var(--sm-text-secondary);border-top:1px solid var(--sm-tool-border)}
+.sm-tool.sm-expanded .sm-tool-body{display:block;padding-top:8px}
+.sm-tool-output{margin-top:8px;padding-top:8px;border-top:1px dashed var(--sm-tool-border)}
+#sm-status{padding:4px 16px 8px;font-size:13px;color:var(--sm-text-secondary);flex-shrink:0;min-height:0}
+#sm-status:empty{padding:0}
+#sm-input-area{display:flex;align-items:flex-end;gap:8px;padding:8px 16px;padding-bottom:calc(8px + var(--sm-safe-bottom));border-top:1px solid var(--sm-border);background:var(--sm-bg);flex-shrink:0}
+#sm-input{flex:1;font-family:var(--sm-font);font-size:16px;line-height:1.4;padding:10px 12px;border:1px solid var(--sm-border);border-radius:var(--sm-radius);background:var(--sm-bg);color:var(--sm-text);resize:none;max-height:120px;outline:none}
+#sm-input:focus{border-color:var(--sm-accent)}
+#sm-input::placeholder{color:var(--sm-text-secondary)}
+.sm-send-btn{background:var(--sm-accent);color:var(--sm-accent-text);border:none;border-radius:var(--sm-radius);width:40px;height:40px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:18px}
+.sm-send-btn:disabled{opacity:0.4;cursor:not-allowed}
+.sm-send-btn.sm-cancel{background:var(--sm-error)}
+/* Panels */
+.sm-panel-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:100}
+.sm-panel-overlay.sm-open{display:block}
+.sm-panel{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:var(--sm-max-width);max-height:70dvh;background:var(--sm-bg);border-radius:16px 16px 0 0;z-index:101;display:flex;flex-direction:column;transition:transform 0.2s}
+.sm-panel-header{display:flex;align-items:center;padding:16px;border-bottom:1px solid var(--sm-border);flex-shrink:0}
+.sm-panel-header h2{font-size:16px;font-weight:600;flex:1}
+.sm-panel-body{overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 0;flex:1}
+.sm-conv-item{display:flex;align-items:center;padding:12px 16px;cursor:pointer;border-bottom:1px solid var(--sm-border)}
+.sm-conv-item:hover{background:var(--sm-bg-secondary)}
+.sm-conv-item.sm-active{background:var(--sm-bg-tertiary);font-weight:500}
+.sm-conv-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sm-conv-time{font-size:12px;color:var(--sm-text-secondary);margin-left:8px;flex-shrink:0}
+.sm-new-conv{padding:12px 16px;cursor:pointer;color:var(--sm-accent);font-weight:500;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--sm-border)}
+.sm-new-conv:hover{background:var(--sm-bg-secondary)}
+/* Settings */
+.sm-setting{padding:12px 16px;display:flex;align-items:center;border-bottom:1px solid var(--sm-border)}
+.sm-setting label{flex:1;font-size:14px}
+.sm-setting select,.sm-setting input[type="range"]{font-size:14px;padding:4px 8px;border:1px solid var(--sm-border);border-radius:6px;background:var(--sm-bg);color:var(--sm-text)}
+.sm-setting select{min-width:100px}
+/* Streaming cursor */
+.sm-cursor{display:inline-block;width:2px;height:1em;background:var(--sm-accent);animation:sm-blink 1s step-end infinite;vertical-align:text-bottom;margin-left:2px}
+@keyframes sm-blink{50%{opacity:0}}
+/* Tool visibility */
+.sm-hide-tools .sm-tool{display:none}
+/* Empty state */
+.sm-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--sm-text-secondary);gap:8px}
+.sm-empty-icon{font-size:40px;opacity:0.3}
+</style>
+</head>
+<body>
+<div id="sm-app">
+  <div id="sm-header">
+    <button class="sm-icon-btn" id="sm-conv-btn" title="Conversations">&#9776;</button>
+    <h1 id="sm-title">{{.ChatTitle}}</h1>
+    <button class="sm-icon-btn" id="sm-settings-btn" title="Settings">&#9881;</button>
+  </div>
+  <div id="sm-messages"></div>
+  <div id="sm-status"></div>
+  <div id="sm-input-area">
+    <textarea id="sm-input" rows="1" placeholder="Message..."></textarea>
+    <button class="sm-send-btn" id="sm-send" title="Send">&#8593;</button>
+  </div>
+</div>
+
+<!-- Conversations panel -->
+<div class="sm-panel-overlay" id="sm-conv-overlay">
+  <div class="sm-panel" id="sm-conv-panel">
+    <div class="sm-panel-header"><h2>Conversations</h2><button class="sm-icon-btn sm-panel-close">&times;</button></div>
+    <div class="sm-panel-body" id="sm-conv-list"></div>
+  </div>
+</div>
+
+<!-- Settings panel -->
+<div class="sm-panel-overlay" id="sm-settings-overlay">
+  <div class="sm-panel" id="sm-settings-panel">
+    <div class="sm-panel-header"><h2>Settings</h2><button class="sm-icon-btn sm-panel-close">&times;</button></div>
+    <div class="sm-panel-body">
+      <div class="sm-setting"><label>Theme</label><select id="sm-theme"><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select></div>
+      <div class="sm-setting"><label>Tool calls</label><select id="sm-tool-vis"><option value="collapsed">Collapsed</option><option value="show">Expanded</option><option value="hidden">Hidden</option></select></div>
+      <div class="sm-setting"><label>System messages</label><select id="sm-sys-vis"><option value="hide">Hidden</option><option value="show">Visible</option></select></div>
+      <div class="sm-setting"><label>Font size</label><select id="sm-fontsize"><option value="13">Small</option><option value="15" selected>Medium</option><option value="17">Large</option></select></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+'use strict';
+
+// --- Config injected by server ---
+var SM_CONFIG = {
+  authMode: '{{.AuthMode}}',
+  authSecret: '{{.AuthSecret}}',
+  chatTitle: '{{.ChatTitle}}'
+};
+
+// --- State ---
+var state = {
+  convId: null,
+  streaming: false,
+  pendingTools: {},
+  authHeader: '',
+  settings: { theme:'auto', toolVis:'collapsed', sysVis:'hide', fontSize:'15' }
+};
+
+// --- DOM refs ---
+var $messages = document.getElementById('sm-messages');
+var $input = document.getElementById('sm-input');
+var $send = document.getElementById('sm-send');
+var $status = document.getElementById('sm-status');
+var $title = document.getElementById('sm-title');
+var $convList = document.getElementById('sm-conv-list');
+var $convOverlay = document.getElementById('sm-conv-overlay');
+var $settingsOverlay = document.getElementById('sm-settings-overlay');
+var $theme = document.getElementById('sm-theme');
+var $toolVis = document.getElementById('sm-tool-vis');
+var $sysVis = document.getElementById('sm-sys-vis');
+var $fontSize = document.getElementById('sm-fontsize');
+
+// --- Auth ---
+var authReady = Promise.resolve();
+if (SM_CONFIG.authMode === 'hmac' && SM_CONFIG.authSecret) {
+  authReady = (async function() {
+    var user = localStorage.getItem('sm-user') || 'chat-user';
+    var enc = new TextEncoder();
+    var key = await crypto.subtle.importKey('raw', enc.encode(SM_CONFIG.authSecret), {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
+    var sig = await crypto.subtle.sign('HMAC', key, enc.encode(user));
+    var hex = Array.from(new Uint8Array(sig)).map(function(b){return b.toString(16).padStart(2,'0')}).join('');
+    state.authHeader = user + ':' + hex;
+  })();
+} else if (SM_CONFIG.authMode === 'trusted') {
+  state.authHeader = localStorage.getItem('sm-user') || 'chat-user';
+}
+
+// --- API ---
+async function api(method, path, body) {
+  await authReady;
+  var opts = { method: method, headers: {} };
+  if (state.authHeader) opts.headers['X-SlotMachine-User'] = state.authHeader;
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  var resp = await fetch(path, opts);
+  if (resp.status === 401) throw new Error('Unauthorized');
+  var text = await resp.text();
+  try { return JSON.parse(text); } catch(e) { return text; }
+}
+
+// --- Markdown renderer ---
+function md(text) {
+  if (!text) return '';
+  // HTML escape
+  text = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Extract fenced code blocks
+  var blocks = [];
+  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, function(_,lang,code){
+    var i = blocks.length;
+    blocks.push('<pre><code'+(lang?' class="lang-'+lang+'"':'')+'>'+code.replace(/\n$/,'')+'</code></pre>');
+    return '\x00CODEBLOCK'+i+'\x00';
+  });
+  // Inline code
+  text = text.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // Headings
+  text = text.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>');
+  text = text.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>');
+  text = text.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>');
+  text = text.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>');
+  // Bold
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Links
+  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // Unordered lists
+  text = text.replace(/(?:^|\n)((?:[-*]\s+.+\n?)+)/g, function(_,block){
+    var items = block.trim().split(/\n/).map(function(l){return '<li>'+l.replace(/^[-*]\s+/,'')+'</li>'}).join('');
+    return '<ul>'+items+'</ul>';
+  });
+  // Ordered lists
+  text = text.replace(/(?:^|\n)((?:\d+\.\s+.+\n?)+)/g, function(_,block){
+    var items = block.trim().split(/\n/).map(function(l){return '<li>'+l.replace(/^\d+\.\s+/,'')+'</li>'}).join('');
+    return '<ol>'+items+'</ol>';
+  });
+  // Paragraphs
+  text = text.replace(/\n{2,}/g, '</p><p>');
+  text = '<p>' + text + '</p>';
+  text = text.replace(/<p>\s*<(h[1-4]|ul|ol|pre)/g, '<$1');
+  text = text.replace(/<\/(h[1-4]|ul|ol|pre)>\s*<\/p>/g, '</$1>');
+  text = text.replace(/<p>\s*<\/p>/g, '');
+  // Single newlines to <br>
+  text = text.replace(/\n/g, '<br>');
+  // Restore code blocks
+  text = text.replace(/\x00CODEBLOCK(\d+)\x00/g, function(_,i){return blocks[parseInt(i)]});
+  return text;
+}
+
+// --- Tool rendering ---
+var TOOL_INFO = {
+  Edit:  { icon:'\u270E', label:'Edited file' },
+  Read:  { icon:'\u{1F441}', label:'Read file' },
+  Write: { icon:'\u{1F4C4}', label:'Wrote file' },
+  Bash:  { icon:'\u{1F4BB}', label:'Ran command' },
+  Glob:  { icon:'\u{1F50D}', label:'Searched files' },
+  Grep:  { icon:'\u{1F50D}', label:'Searched code' },
+  WebFetch: { icon:'\u{1F310}', label:'Fetched URL' },
+  WebSearch: { icon:'\u{1F310}', label:'Web search' },
+  Task:  { icon:'\u{1F916}', label:'Spawned agent' }
+};
+function getToolInfo(name) {
+  return TOOL_INFO[name] || { icon:'\u{1F527}', label:name || 'Tool' };
+}
+
+function createToolEl(name, id) {
+  var info = getToolInfo(name);
+  var el = document.createElement('div');
+  el.className = 'sm-tool';
+  el.dataset.toolId = id;
+  el.innerHTML = '<div class="sm-tool-header"><span class="sm-tool-icon">'+info.icon+'</span><span>'+info.label+'</span><span class="sm-tool-chevron">\u25B6</span></div><div class="sm-tool-body"><div class="sm-tool-input"></div></div>';
+  el.querySelector('.sm-tool-header').addEventListener('click', function(){
+    el.classList.toggle('sm-expanded');
+  });
+  if (state.settings.toolVis === 'show') el.classList.add('sm-expanded');
+  return el;
+}
+
+function fillToolResult(id, output) {
+  var el = $messages.querySelector('[data-tool-id="'+id+'"]');
+  if (!el) return;
+  var body = el.querySelector('.sm-tool-body');
+  var outEl = document.createElement('div');
+  outEl.className = 'sm-tool-output';
+  outEl.textContent = output;
+  body.appendChild(outEl);
+}
+
+// --- Message rendering ---
+function appendMessage(role, html, opts) {
+  opts = opts || {};
+  var el = document.createElement('div');
+  el.className = 'sm-msg';
+  var roleLabel = role === 'user' ? 'You' : role === 'assistant' ? 'Agent' : role;
+  var roleClass = role === 'user' ? ' sm-role-user' : '';
+  if (role === 'system' && state.settings.sysVis === 'hide') el.style.display = 'none';
+  el.innerHTML = '<div class="sm-msg-role'+roleClass+'">'+roleLabel+'</div><div class="sm-msg-content">'+html+'</div>';
+  $messages.appendChild(el);
+  if (opts.id) el.dataset.msgId = opts.id;
+  scrollToBottom();
+  return el;
+}
+
+var currentAssistantEl = null;
+var currentAssistantText = '';
+
+function appendAssistantChunk(text) {
+  currentAssistantText += text;
+  if (!currentAssistantEl) {
+    currentAssistantEl = appendMessage('assistant', '', {});
+  }
+  var contentEl = currentAssistantEl.querySelector('.sm-msg-content');
+  contentEl.innerHTML = md(currentAssistantText) + '<span class="sm-cursor"></span>';
+  scrollToBottom();
+}
+
+function finalizeAssistant() {
+  if (currentAssistantEl) {
+    var contentEl = currentAssistantEl.querySelector('.sm-msg-content');
+    contentEl.innerHTML = md(currentAssistantText);
+    var cursor = contentEl.querySelector('.sm-cursor');
+    if (cursor) cursor.remove();
+  }
+  currentAssistantEl = null;
+  currentAssistantText = '';
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(function(){ $messages.scrollTop = $messages.scrollHeight; });
+}
+
+// --- SSE ---
+var evtSource = null;
+
+function connectSSE(convId) {
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  evtSource = new EventSource('/agent/conversations/'+convId+'/stream');
+
+  evtSource.addEventListener('assistant', function(e) {
+    try {
+      var d = JSON.parse(e.data);
+      appendAssistantChunk(d.content || '');
+    } catch(err){}
+  });
+
+  evtSource.addEventListener('tool_use', function(e) {
+    try {
+      var d = JSON.parse(e.data);
+      finalizeAssistant();
+      var toolEl = createToolEl(d.tool, d.id);
+      $messages.appendChild(toolEl);
+      state.pendingTools[d.id] = toolEl;
+      scrollToBottom();
+    } catch(err){}
+  });
+
+  evtSource.addEventListener('tool_result', function(e) {
+    try {
+      var d = JSON.parse(e.data);
+      fillToolResult(d.id, d.output);
+      scrollToBottom();
+    } catch(err){}
+  });
+
+  evtSource.addEventListener('system', function(e) {
+    // System events (init, etc.) — optionally shown.
+    if (state.settings.sysVis === 'show') {
+      try {
+        var d = JSON.parse(e.data);
+        if (d.subtype === 'init') {
+          appendMessage('system', 'Session started');
+        }
+      } catch(err){}
+    }
+  });
+
+  evtSource.addEventListener('done', function(e) {
+    finalizeAssistant();
+    setStreaming(false);
+    if (evtSource) { evtSource.close(); evtSource = null; }
+    // Refresh conversation to get updated title.
+    if (state.convId) loadConversation(state.convId, true);
+  });
+
+  evtSource.onerror = function() {
+    if (evtSource) { evtSource.close(); evtSource = null; }
+    finalizeAssistant();
+    setStreaming(false);
+  };
+}
+
+// --- Streaming state ---
+function setStreaming(on) {
+  state.streaming = on;
+  $input.disabled = on;
+  $send.innerHTML = on ? '&#10005;' : '&#8593;';
+  $send.className = 'sm-send-btn' + (on ? ' sm-cancel' : '');
+  $send.title = on ? 'Cancel' : 'Send';
+  $status.textContent = on ? 'Agent is working\u2026' : '';
+  if (!on) { $input.focus(); state.pendingTools = {}; }
+}
+
+// --- Conversations ---
+async function loadConversations() {
+  try {
+    var convs = await api('GET', '/agent/conversations');
+    renderConvList(convs || []);
+  } catch(err) {
+    console.error('loadConversations:', err);
+  }
+}
+
+function renderConvList(convs) {
+  var html = '<div class="sm-new-conv" id="sm-new-conv">+ New conversation</div>';
+  convs.sort(function(a,b){ return (b.updated_at||b.created_at||'').localeCompare(a.updated_at||a.created_at||'') });
+  convs.forEach(function(c){
+    var active = c.id === state.convId ? ' sm-active' : '';
+    var title = c.title || 'Untitled';
+    var time = formatTime(c.updated_at || c.created_at);
+    html += '<div class="sm-conv-item'+active+'" data-conv-id="'+c.id+'"><span class="sm-conv-title">'+escHtml(title)+'</span><span class="sm-conv-time">'+time+'</span></div>';
+  });
+  $convList.innerHTML = html;
+  document.getElementById('sm-new-conv').addEventListener('click', createConversation);
+  $convList.querySelectorAll('.sm-conv-item').forEach(function(el){
+    el.addEventListener('click', function(){ switchConversation(el.dataset.convId); });
+  });
+}
+
+async function createConversation() {
+  try {
+    var conv = await api('POST', '/agent/conversations');
+    state.convId = conv.id;
+    closePanel($convOverlay);
+    $messages.innerHTML = '';
+    showEmpty();
+    $title.textContent = SM_CONFIG.chatTitle || 'slot-machine';
+    $input.focus();
+    loadConversations();
+  } catch(err) {
+    console.error('createConversation:', err);
+  }
+}
+
+async function loadConversation(id, silent) {
+  try {
+    var data = await api('GET', '/agent/conversations/'+id);
+    if (!data || !data.conversation) return;
+    state.convId = id;
+    var conv = data.conversation;
+    if (conv.title) $title.textContent = conv.title;
+    if (!silent) {
+      $messages.innerHTML = '';
+      renderStoredMessages(data.messages || []);
+    } else if (conv.title) {
+      $title.textContent = conv.title;
+    }
+  } catch(err) {
+    console.error('loadConversation:', err);
+  }
+}
+
+function renderStoredMessages(msgs) {
+  msgs.forEach(function(m) {
+    if (m.type === 'user') {
+      appendMessage('user', md(m.content));
+    } else if (m.type === 'assistant') {
+      try {
+        var d = JSON.parse(m.content);
+        appendMessage('assistant', md(d.content || m.content));
+      } catch(e) {
+        appendMessage('assistant', md(m.content));
+      }
+    } else if (m.type === 'tool_use') {
+      try {
+        var d = JSON.parse(m.content);
+        var toolEl = createToolEl(d.tool, d.id);
+        $messages.appendChild(toolEl);
+      } catch(e){}
+    } else if (m.type === 'tool_result') {
+      try {
+        var d = JSON.parse(m.content);
+        fillToolResult(d.id, d.output);
+      } catch(e){}
+    } else if (m.type === 'system' && state.settings.sysVis === 'show') {
+      appendMessage('system', 'System event');
+    }
+  });
+  scrollToBottom();
+}
+
+function switchConversation(id) {
+  closePanel($convOverlay);
+  loadConversation(id);
+}
+
+function showEmpty() {
+  if ($messages.children.length === 0) {
+    $messages.innerHTML = '<div class="sm-empty"><div class="sm-empty-icon">\u{1F4AC}</div><div>Start a conversation</div></div>';
+  }
+}
+
+// --- Send ---
+async function sendMessage() {
+  var text = $input.value.trim();
+  if (!text || state.streaming) return;
+  if (!state.convId) await createConversation();
+
+  // Clear empty state.
+  var empty = $messages.querySelector('.sm-empty');
+  if (empty) empty.remove();
+
+  appendMessage('user', md(text));
+  $input.value = '';
+  autoResize();
+  setStreaming(true);
+
+  try {
+    await api('POST', '/agent/conversations/'+state.convId+'/messages', {content: text});
+    connectSSE(state.convId);
+  } catch(err) {
+    appendMessage('system', '<span style="color:var(--sm-error)">Error: '+escHtml(err.message)+'</span>');
+    setStreaming(false);
+  }
+}
+
+async function cancelAgent() {
+  if (!state.convId) return;
+  try {
+    await api('POST', '/agent/conversations/'+state.convId+'/cancel');
+  } catch(err){}
+}
+
+// --- Input handling ---
+$input.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (state.streaming) cancelAgent(); else sendMessage();
+  }
+});
+$input.addEventListener('input', autoResize);
+
+function autoResize() {
+  $input.style.height = 'auto';
+  $input.style.height = Math.min($input.scrollHeight, 120) + 'px';
+}
+
+$send.addEventListener('click', function() {
+  if (state.streaming) cancelAgent(); else sendMessage();
+});
+
+// --- Panels ---
+document.getElementById('sm-conv-btn').addEventListener('click', function(){
+  loadConversations();
+  openPanel($convOverlay);
+});
+document.getElementById('sm-settings-btn').addEventListener('click', function(){ openPanel($settingsOverlay); });
+
+document.querySelectorAll('.sm-panel-close').forEach(function(btn){
+  btn.addEventListener('click', function(){ closePanel(btn.closest('.sm-panel-overlay')); });
+});
+document.querySelectorAll('.sm-panel-overlay').forEach(function(ov){
+  ov.addEventListener('click', function(e){ if(e.target === ov) closePanel(ov); });
+});
+
+function openPanel(ov) { ov.classList.add('sm-open'); }
+function closePanel(ov) { ov.classList.remove('sm-open'); }
+
+// --- Settings ---
+function loadSettings() {
+  try {
+    var s = JSON.parse(localStorage.getItem('sm-settings'));
+    if (s) Object.assign(state.settings, s);
+  } catch(e){}
+  applySettings();
+  $theme.value = state.settings.theme;
+  $toolVis.value = state.settings.toolVis;
+  $sysVis.value = state.settings.sysVis;
+  $fontSize.value = state.settings.fontSize;
+}
+
+function saveSettings() {
+  localStorage.setItem('sm-settings', JSON.stringify(state.settings));
+  applySettings();
+}
+
+function applySettings() {
+  document.documentElement.setAttribute('data-theme', state.settings.theme);
+  document.documentElement.style.setProperty('--sm-font-size', state.settings.fontSize + 'px');
+  $messages.classList.toggle('sm-hide-tools', state.settings.toolVis === 'hidden');
+}
+
+$theme.addEventListener('change', function(){ state.settings.theme = $theme.value; saveSettings(); });
+$toolVis.addEventListener('change', function(){ state.settings.toolVis = $toolVis.value; saveSettings(); });
+$sysVis.addEventListener('change', function(){ state.settings.sysVis = $sysVis.value; saveSettings(); });
+$fontSize.addEventListener('change', function(){ state.settings.fontSize = $fontSize.value; saveSettings(); });
+
+// --- Helpers ---
+function escHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function formatTime(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  var now = new Date();
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  return d.toLocaleDateString([], {month:'short',day:'numeric'});
+}
+
+// --- Init ---
+loadSettings();
+authReady.then(function(){
+  loadConversations().then(function(){
+    // Auto-load most recent conversation, or show empty.
+    var items = $convList.querySelectorAll('.sm-conv-item');
+    if (items.length > 0) {
+      switchConversation(items[0].dataset.convId);
+    } else {
+      showEmpty();
+    }
+  });
+});
+
+})();
+</script>
+</body>
+</html>

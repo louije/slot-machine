@@ -152,6 +152,8 @@ func cmdStart(args []string) {
 		stagingDir: filepath.Join(*dataDir, "slot-staging"),
 		authMode:   authMode,
 		authSecret: authSecret,
+		chatTitle:  cfg.ChatTitle,
+		chatAccent: cfg.ChatAccent,
 		envFunc: func() []string {
 			env := os.Environ()
 			if cfg.EnvFile != "" {

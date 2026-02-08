@@ -35,7 +35,7 @@ func main() {
 	// Init event.
 	fmt.Fprintf(os.Stdout, "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%s\"}\n", sessionID)
 
-	// Assistant events at interval.
+	// Assistant events at interval, with tool events interleaved.
 	for i := 0; i < *duration; i++ {
 		time.Sleep(time.Duration(*interval) * time.Millisecond)
 		text := fmt.Sprintf("working on: %s (%d/%d)", *prompt, i+1, *duration)
@@ -43,6 +43,20 @@ func main() {
 			text = fmt.Sprintf("[[TITLE: %s]]\n%s", *prompt, text)
 		}
 		fmt.Fprintf(os.Stdout, "{\"type\":\"assistant\",\"text\":%q}\n", text)
+
+		// Emit tool events after the first two assistant messages.
+		if i == 0 {
+			time.Sleep(time.Duration(*interval) * time.Millisecond)
+			fmt.Fprintln(os.Stdout, `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_001","name":"Edit","input":{}}}`)
+			time.Sleep(time.Duration(*interval) * time.Millisecond)
+			fmt.Fprintln(os.Stdout, `{"type":"tool_result","tool_use_id":"tool_001","content":"File edited successfully"}`)
+		}
+		if i == 1 {
+			time.Sleep(time.Duration(*interval) * time.Millisecond)
+			fmt.Fprintln(os.Stdout, `{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tool_002","name":"Bash","input":{}}}`)
+			time.Sleep(time.Duration(*interval) * time.Millisecond)
+			fmt.Fprintln(os.Stdout, `{"type":"tool_result","tool_use_id":"tool_002","content":"$ git status\nnothing to commit"}`)
+		}
 	}
 
 	// Result event.

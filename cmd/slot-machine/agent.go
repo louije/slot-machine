@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"crypto/hmac"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"os"
@@ -18,6 +20,18 @@ import (
 	"time"
 )
 
+//go:embed chat.html
+var chatHTML string
+
+var chatTmpl = template.Must(template.New("chat").Parse(chatHTML))
+
+type chatTemplateData struct {
+	AuthMode   string
+	AuthSecret string
+	ChatTitle  string
+	ChatAccent string
+}
+
 type agentService struct {
 	store      *agentStore
 	mu         sync.Mutex
@@ -27,6 +41,8 @@ type agentService struct {
 	envFunc    func() []string
 	authMode   string // "hmac", "trusted", "none"
 	authSecret string // hex-encoded HMAC secret (for "hmac" mode)
+	chatTitle  string
+	chatAccent string
 }
 
 type agentSession struct {
@@ -93,6 +109,10 @@ func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.handleChat(w, r)
 		return
 	}
+	if r.URL.Path == "/chat.css" {
+		a.handleChatCSS(w, r)
+		return
+	}
 
 	// Auth check for /agent/* paths in hmac mode.
 	if strings.HasPrefix(r.URL.Path, "/agent/") && a.authMode == "hmac" {
@@ -139,11 +159,27 @@ func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *agentService) handleChat(w http.ResponseWriter, r *http.Request) {
+	title := a.chatTitle
+	if title == "" {
+		title = "slot-machine"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, `<!DOCTYPE html>
-<html><head><title>slot-machine</title></head>
-<body><div id="chat"></div></body>
-</html>`)
+	chatTmpl.Execute(w, chatTemplateData{
+		AuthMode:   a.authMode,
+		AuthSecret: a.authSecret,
+		ChatTitle:  title,
+		ChatAccent: a.chatAccent,
+	})
+}
+
+func (a *agentService) handleChatCSS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/css")
+	data, err := os.ReadFile(filepath.Join(a.stagingDir, "chat.css"))
+	if err != nil {
+		w.WriteHeader(200)
+		return
+	}
+	w.Write(data)
 }
 
 func (a *agentService) handleListConversations(w http.ResponseWriter, r *http.Request) {
@@ -368,6 +404,27 @@ func (a *agentService) processAgentOutput(convID string, session *agentSession, 
 
 			sseType = "done"
 			sseData = line // raw result JSON
+
+		case "content_block_start":
+			cb, _ := raw["content_block"].(map[string]any)
+			if cb == nil {
+				continue
+			}
+			if cbType, _ := cb["type"].(string); cbType != "tool_use" {
+				continue
+			}
+			toolName, _ := cb["name"].(string)
+			toolID, _ := cb["id"].(string)
+			data, _ := json.Marshal(map[string]string{"tool": toolName, "id": toolID})
+			sseType = "tool_use"
+			sseData = string(data)
+
+		case "tool_result":
+			toolID, _ := raw["tool_use_id"].(string)
+			content, _ := raw["content"].(string)
+			data, _ := json.Marshal(map[string]string{"id": toolID, "output": content})
+			sseType = "tool_result"
+			sseData = string(data)
 
 		default:
 			continue
