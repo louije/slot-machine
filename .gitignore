@@ -1,4 +1,7 @@
 .DS_Store
+*.log
+*.db
 spec/testapp/testapp
 spec/testagent/testagent
 /slot-machine
+/docs/
