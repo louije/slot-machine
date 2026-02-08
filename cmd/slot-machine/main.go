@@ -34,8 +34,6 @@ import (
 	"time"
 )
 
-const specVersion = "2" // spec/VERSION
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -246,7 +244,7 @@ func (o *orchestrator) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// Deploy logic (v2: start-before-drain, dynamic ports)
+// Deploy logic
 // ---------------------------------------------------------------------------
 
 func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
@@ -1218,7 +1216,7 @@ func main() {
 	case "status":
 		cmdStatus()
 	case "version":
-		fmt.Printf("slot-machine (go) spec/%s\n", specVersion)
+		fmt.Println("slot-machine (go)")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		os.Exit(1)

@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -604,4 +605,432 @@ func TestDaemonShutdownDrainsProcesses(t *testing.T) {
 
 	// App port should be down — no orphan processes.
 	waitForDown(t, appPort, 5*time.Second)
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: Zero downtime during deploy
+// ---------------------------------------------------------------------------
+//
+// Deploys commit A, then starts a slow deploy of commit B. While B is
+// booting, the public port must continue responding (A still serving).
+
+func TestZeroDowntime(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	_ = orch
+
+	// Deploy commit A.
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy A failed")
+	}
+	waitForHealth(t, appPort, 5*time.Second)
+
+	// Start deploying the slow commit (3s boot delay) asynchronously.
+	slowResult := deployAsync(t, apiPort, repo.CommitSlow)
+
+	// Wait for the deploy to be in progress.
+	time.Sleep(1 * time.Second)
+
+	// The public port must still respond during deploy.
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", appPort))
+	if err != nil {
+		t.Fatalf("zero downtime violated: port %d not responding during deploy: %v", appPort, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("zero downtime violated: port %d returned %d during deploy", appPort, resp.StatusCode)
+	}
+
+	// Wait for the slow deploy to finish.
+	select {
+	case result := <-slowResult:
+		if result.Err != nil {
+			t.Fatalf("slow deploy: %v", result.Err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("slow deploy timed out")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: Status includes staging directory
+// ---------------------------------------------------------------------------
+
+func TestStatusIncludesStagingDir(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	_ = orch
+
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy failed")
+	}
+
+	st := status(t, apiPort)
+	if st.StagingDir == "" {
+		t.Fatal("expected staging_dir in status response, got empty string")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 20: Staging preserves artifacts from promoted slot
+// ---------------------------------------------------------------------------
+
+func TestStagingPreservesArtifacts(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+
+	contractDir := t.TempDir()
+	cfg := map[string]any{
+		"start_command":     "./start.sh",
+		"setup_command":     "touch .setup-marker",
+		"port":              appPort,
+		"internal_port":     intPort,
+		"health_endpoint":   "/healthz",
+		"health_timeout_ms": 3000,
+		"drain_timeout_ms":  2000,
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	contractPath := filepath.Join(contractDir, "app.contract.json")
+	os.WriteFile(contractPath, data, 0644)
+
+	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort)
+
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy failed")
+	}
+
+	// The staging directory should exist and contain the marker.
+	stagingDir := filepath.Join(orch.DataDir, "slot-staging")
+	marker := filepath.Join(stagingDir, ".setup-marker")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("staging should preserve artifacts from promoted slot: %s not found: %v", marker, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 21: Symlinks on disk
+// ---------------------------------------------------------------------------
+
+func TestSymlinksOnDisk(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+
+	// Deploy A.
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy A failed")
+	}
+
+	// Check live symlink exists and references commit A.
+	liveLink := filepath.Join(orch.DataDir, "live")
+	target, err := os.Readlink(liveLink)
+	if err != nil {
+		t.Fatalf("expected live symlink at %s: %v", liveLink, err)
+	}
+	if !strings.Contains(target, repo.CommitA[:8]) {
+		t.Fatalf("live symlink %s does not reference commit %s", target, repo.CommitA[:8])
+	}
+
+	// Deploy B.
+	dr, _ = deploy(t, apiPort, repo.CommitB)
+	if !dr.Success {
+		t.Fatal("deploy B failed")
+	}
+
+	// live → commit B.
+	target, err = os.Readlink(liveLink)
+	if err != nil {
+		t.Fatalf("live symlink missing after second deploy: %v", err)
+	}
+	if !strings.Contains(target, repo.CommitB[:8]) {
+		t.Fatalf("live symlink %s does not reference commit %s", target, repo.CommitB[:8])
+	}
+
+	// prev → commit A.
+	prevLink := filepath.Join(orch.DataDir, "prev")
+	target, err = os.Readlink(prevLink)
+	if err != nil {
+		t.Fatalf("expected prev symlink at %s: %v", prevLink, err)
+	}
+	if !strings.Contains(target, repo.CommitA[:8]) {
+		t.Fatalf("prev symlink %s does not reference commit %s", target, repo.CommitA[:8])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 22: Daemon restart preserves state
+// ---------------------------------------------------------------------------
+
+func TestDaemonRestart(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contractPath := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+	dataDir := t.TempDir()
+
+	startDaemon := func() *exec.Cmd {
+		t.Helper()
+		cmd := exec.Command(bin,
+			"start",
+			"--config", contractPath,
+			"--repo", repo.Dir,
+			"--data", dataDir,
+			"--port", fmt.Sprintf("%d", apiPort),
+			"--no-proxy",
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("starting daemon: %v", err)
+		}
+		return cmd
+	}
+
+	stopDaemon := func(cmd *exec.Cmd) {
+		t.Helper()
+		cmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cmd.Process.Signal(syscall.SIGKILL)
+			<-done
+		}
+	}
+
+	// First run: deploy A.
+	cmd1 := startDaemon()
+	waitForHealth(t, apiPort, 5*time.Second)
+
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy failed")
+	}
+	st := status(t, apiPort)
+	if st.LiveCommit != repo.CommitA {
+		t.Fatalf("expected live_commit=%s, got %s", repo.CommitA, st.LiveCommit)
+	}
+
+	// Stop daemon.
+	stopDaemon(cmd1)
+	time.Sleep(500 * time.Millisecond)
+
+	// Second run: same data dir — state should persist.
+	cmd2 := startDaemon()
+	defer stopDaemon(cmd2)
+	waitForHealth(t, apiPort, 5*time.Second)
+
+	st = status(t, apiPort)
+	if st.LiveCommit != repo.CommitA {
+		t.Fatalf("after restart: expected live_commit=%s, got %s (state not persisted)", repo.CommitA, st.LiveCommit)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 23: Garbage collection
+// ---------------------------------------------------------------------------
+//
+// After three deploys (A → B → C), the first deploy's slot directory
+// should be garbage collected. Only live + prev slot dirs remain.
+
+func TestGarbageCollection(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+
+	// Deploy A.
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy A failed")
+	}
+
+	// A's slot dir should use hash-based naming.
+	aSlotDir := filepath.Join(orch.DataDir, fmt.Sprintf("slot-%s", repo.CommitA[:8]))
+	if _, err := os.Stat(aSlotDir); err != nil {
+		t.Fatalf("after deploy A: expected %s to exist (hash-based slot naming): %v", aSlotDir, err)
+	}
+
+	// Deploy B.
+	dr, _ = deploy(t, apiPort, repo.CommitB)
+	if !dr.Success {
+		t.Fatal("deploy B failed")
+	}
+
+	// Deploy C (third deploy triggers GC of A).
+	dr, _ = deploy(t, apiPort, repo.CommitC)
+	if !dr.Success {
+		t.Fatal("deploy C failed")
+	}
+
+	// A should be garbage collected.
+	if _, err := os.Stat(aSlotDir); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be garbage collected after three deploys", aSlotDir)
+	}
+
+	// B should still exist (it's prev).
+	bSlotDir := filepath.Join(orch.DataDir, fmt.Sprintf("slot-%s", repo.CommitB[:8]))
+	if _, err := os.Stat(bSlotDir); err != nil {
+		t.Fatalf("prev slot %s should still exist: %v", bSlotDir, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 24: Rollback then deploy
+// ---------------------------------------------------------------------------
+//
+// After a rollback, deploying a new commit should work normally.
+
+func TestRollbackThenDeploy(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	_ = orch
+
+	// Deploy A, then B.
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy A failed")
+	}
+	dr, _ = deploy(t, apiPort, repo.CommitB)
+	if !dr.Success {
+		t.Fatal("deploy B failed")
+	}
+
+	// Rollback to A.
+	rr, code := rollback(t, apiPort)
+	if code != 200 || !rr.Success {
+		t.Fatalf("rollback failed: code=%d", code)
+	}
+	st := status(t, apiPort)
+	if st.LiveCommit != repo.CommitA {
+		t.Fatalf("after rollback: expected live=%s, got %s", repo.CommitA, st.LiveCommit)
+	}
+
+	// Deploy C — should work after rollback.
+	dr, _ = deploy(t, apiPort, repo.CommitC)
+	if !dr.Success {
+		t.Fatal("deploy after rollback failed")
+	}
+	st = status(t, apiPort)
+	if st.LiveCommit != repo.CommitC {
+		t.Fatalf("after post-rollback deploy: expected live=%s, got %s", repo.CommitC, st.LiveCommit)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 25: Re-deploy same commit
+// ---------------------------------------------------------------------------
+//
+// Deploying the same commit that is already live should succeed and use a
+// proper hash-based slot name (not "slot-staging").
+
+func TestRedeploySameCommit(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	_ = orch
+
+	// Deploy A, then B.
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy A failed")
+	}
+	dr, _ = deploy(t, apiPort, repo.CommitB)
+	if !dr.Success {
+		t.Fatal("deploy B failed")
+	}
+
+	// Re-deploy B (same commit as live).
+	dr, _ = deploy(t, apiPort, repo.CommitB)
+	if !dr.Success {
+		t.Fatal("re-deploy B failed")
+	}
+
+	expectedSlot := fmt.Sprintf("slot-%s", repo.CommitB[:8])
+	if dr.Slot != expectedSlot {
+		t.Fatalf("re-deploy slot = %q, want %q (should not be slot-staging)", dr.Slot, expectedSlot)
+	}
+
+	st := status(t, apiPort)
+	if st.LiveCommit != repo.CommitB {
+		t.Fatalf("expected live=%s, got %s", repo.CommitB, st.LiveCommit)
+	}
+	if st.LiveSlot != expectedSlot {
+		t.Fatalf("expected live_slot=%s, got %s", expectedSlot, st.LiveSlot)
+	}
 }

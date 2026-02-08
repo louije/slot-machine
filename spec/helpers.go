@@ -52,6 +52,7 @@ type StatusResponse struct {
 	LiveCommit     string `json:"live_commit"`
 	PreviousSlot   string `json:"previous_slot"`
 	PreviousCommit string `json:"previous_commit"`
+	StagingDir     string `json:"staging_dir"`
 	LastDeployTime string `json:"last_deploy_time"`
 	Healthy        bool   `json:"healthy"`
 }
