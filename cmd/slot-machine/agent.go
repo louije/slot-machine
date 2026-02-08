@@ -2,11 +2,17 @@ package main
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +25,8 @@ type agentService struct {
 	agentBin   string
 	stagingDir string
 	envFunc    func() []string
+	authMode   string // "hmac", "trusted", "none"
+	authSecret string // hex-encoded HMAC secret (for "hmac" mode)
 }
 
 type agentSession struct {
@@ -33,10 +41,65 @@ type agentEvent struct {
 	Data string // SSE data (JSON)
 }
 
+var titlePattern = regexp.MustCompile(`\[\[TITLE:\s*(.+?)\]\]`)
+
+func (a *agentService) extractUser(r *http.Request) string {
+	header := r.Header.Get("X-SlotMachine-User")
+	switch a.authMode {
+	case "hmac":
+		idx := strings.LastIndex(header, ":")
+		if idx < 1 {
+			return ""
+		}
+		user, sig := header[:idx], header[idx+1:]
+		mac := hmac.New(sha256.New, []byte(a.authSecret))
+		mac.Write([]byte(user))
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if !hmac.Equal([]byte(sig), []byte(expected)) {
+			return ""
+		}
+		return user
+	case "trusted":
+		return header
+	default:
+		return ""
+	}
+}
+
+func (a *agentService) buildSystemPrompt() string {
+	var b strings.Builder
+	b.WriteString("You are an AI assistant embedded in a web application via slot-machine.\n")
+	b.WriteString("You are working in the application's source code directory.\n")
+
+	agentMD, err := os.ReadFile(filepath.Join(a.stagingDir, "agent.md"))
+	if err == nil && len(agentMD) > 0 {
+		b.WriteString("\n")
+		b.Write(agentMD)
+		if agentMD[len(agentMD)-1] != '\n' {
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n## Conversation titling\n")
+	b.WriteString("Include a conversation title in your responses using this format on its own line:\n")
+	b.WriteString("[[TITLE: short descriptive title]]\n")
+	b.WriteString("Include this in your first response. You may include it again to update the title if the topic changes.\n")
+
+	return b.String()
+}
+
 func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/chat" {
 		a.handleChat(w, r)
 		return
+	}
+
+	// Auth check for /agent/* paths in hmac mode.
+	if strings.HasPrefix(r.URL.Path, "/agent/") && a.authMode == "hmac" {
+		if a.extractUser(r) == "" {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
 	}
 
 	if r.URL.Path == "/agent/conversations" {
@@ -96,15 +159,21 @@ func (a *agentService) handleListConversations(w http.ResponseWriter, r *http.Re
 }
 
 func (a *agentService) handleCreateConversation(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		User string `json:"user"`
-	}
-	if r.Body != nil {
-		json.NewDecoder(r.Body).Decode(&req) // best-effort
+	user := a.extractUser(r)
+
+	// Fallback: allow user from body in "none" mode.
+	if user == "" && a.authMode != "hmac" {
+		var req struct {
+			User string `json:"user"`
+		}
+		if r.Body != nil {
+			json.NewDecoder(r.Body).Decode(&req)
+		}
+		user = req.User
 	}
 
 	id := fmt.Sprintf("conv-%d", time.Now().UnixNano())
-	conv, err := a.store.createConversation(id, req.User)
+	conv, err := a.store.createConversation(id, user)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -185,6 +254,7 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 	args := []string{
 		"--output-format", "stream-json",
 		"-p", msg.Content,
+		"--system-prompt", a.buildSystemPrompt(),
 	}
 	if conv.SessionID != "" {
 		args = append(args, "--resume", conv.SessionID)
@@ -273,6 +343,17 @@ func (a *agentService) processAgentOutput(convID string, session *agentSession, 
 
 		case "assistant":
 			text, _ := raw["text"].(string)
+
+			// Extract and strip [[TITLE: ...]] markers.
+			if m := titlePattern.FindStringSubmatch(text); m != nil {
+				a.store.updateTitle(convID, strings.TrimSpace(m[1]))
+				text = strings.TrimSpace(titlePattern.ReplaceAllString(text, ""))
+			}
+
+			if text == "" {
+				continue // title-only message, nothing to forward
+			}
+
 			data, _ := json.Marshal(map[string]string{"content": text})
 			sseType = "assistant"
 			sseData = string(data)

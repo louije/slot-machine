@@ -209,6 +209,7 @@ func writeTestContract(t *testing.T, dir string, port, internalPort, drainTimeou
 		"health_endpoint":   "/healthz",
 		"health_timeout_ms": 3000,
 		"drain_timeout_ms":  drainTimeoutMs,
+		"agent_auth":        "none",
 	}
 
 	data, err := json.MarshalIndent(contract, "", "  ")

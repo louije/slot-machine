@@ -54,6 +54,9 @@ func (o *orchestrator) buildEnv(appPort, intPort int) []string {
 		fmt.Sprintf("PORT=%d", appPort),
 		fmt.Sprintf("INTERNAL_PORT=%d", intPort),
 	)
+	if o.authSecret != "" {
+		env = append(env, "SLOT_MACHINE_AUTH_SECRET="+o.authSecret)
+	}
 	return env
 }
 

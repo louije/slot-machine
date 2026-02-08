@@ -10,4 +10,5 @@ type config struct {
 	DrainTimeoutMs  int    `json:"drain_timeout_ms"`
 	EnvFile         string `json:"env_file"`
 	APIPort         int    `json:"api_port"`
+	AgentAuth       string `json:"agent_auth"` // "hmac" (default), "trusted", "none"
 }

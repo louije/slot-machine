@@ -12,9 +12,10 @@ import (
 )
 
 type orchestrator struct {
-	cfg     config
-	repoDir string
-	dataDir string
+	cfg        config
+	repoDir    string
+	dataDir    string
+	authSecret string // hex HMAC secret, passed to app as SLOT_MACHINE_AUTH_SECRET
 
 	mu         sync.Mutex
 	deploying  bool

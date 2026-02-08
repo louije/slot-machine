@@ -16,6 +16,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -121,6 +123,22 @@ func cmdStart(args []string) {
 		intProxyAddr = fmt.Sprintf(":%d", cfg.InternalPort)
 	}
 
+	// Auth setup.
+	authMode := cfg.AgentAuth
+	if authMode == "" {
+		authMode = "hmac"
+	}
+	var authSecret string
+	if authMode == "hmac" {
+		secretBytes := make([]byte, 32)
+		if _, err := rand.Read(secretBytes); err != nil {
+			fmt.Fprintf(os.Stderr, "error generating auth secret: %v\n", err)
+			os.Exit(1)
+		}
+		authSecret = hex.EncodeToString(secretBytes)
+	}
+	fmt.Printf("agent auth: %s\n", authMode)
+
 	store, err := openAgentStore(filepath.Join(*dataDir, "agent.db"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error opening agent store: %v\n", err)
@@ -132,6 +150,8 @@ func cmdStart(args []string) {
 		sessions:   make(map[string]*agentSession),
 		agentBin:   os.Getenv("SLOT_MACHINE_AGENT_BIN"),
 		stagingDir: filepath.Join(*dataDir, "slot-staging"),
+		authMode:   authMode,
+		authSecret: authSecret,
 		envFunc: func() []string {
 			env := os.Environ()
 			if cfg.EnvFile != "" {
@@ -144,11 +164,12 @@ func cmdStart(args []string) {
 	}
 
 	o := &orchestrator{
-		cfg:      cfg,
-		repoDir:  absRepo,
-		dataDir:  *dataDir,
-		appProxy: newDynamicProxy(appProxyAddr, agent),
-		intProxy: newDynamicProxy(intProxyAddr, nil),
+		cfg:        cfg,
+		repoDir:    absRepo,
+		dataDir:    *dataDir,
+		authSecret: authSecret,
+		appProxy:   newDynamicProxy(appProxyAddr, agent),
+		intProxy:   newDynamicProxy(intProxyAddr, nil),
 	}
 
 	// Recover state from symlinks.

@@ -1,12 +1,16 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -393,6 +397,120 @@ func TestStatusHandler(t *testing.T) {
 			t.Errorf("body missing %q: %s", want, body)
 		}
 	}
+}
+
+func TestExtractUser(t *testing.T) {
+	t.Parallel()
+	secret := "deadbeef1234"
+
+	t.Run("hmac valid", func(t *testing.T) {
+		a := &agentService{authMode: "hmac", authSecret: secret}
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte("alice"))
+		sig := hex.EncodeToString(mac.Sum(nil))
+
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("X-SlotMachine-User", "alice:"+sig)
+		if got := a.extractUser(r); got != "alice" {
+			t.Fatalf("got %q, want alice", got)
+		}
+	})
+
+	t.Run("hmac invalid sig", func(t *testing.T) {
+		a := &agentService{authMode: "hmac", authSecret: secret}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("X-SlotMachine-User", "alice:badsig")
+		if got := a.extractUser(r); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("hmac missing header", func(t *testing.T) {
+		a := &agentService{authMode: "hmac", authSecret: secret}
+		r := httptest.NewRequest("GET", "/", nil)
+		if got := a.extractUser(r); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("trusted", func(t *testing.T) {
+		a := &agentService{authMode: "trusted"}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("X-SlotMachine-User", "bob")
+		if got := a.extractUser(r); got != "bob" {
+			t.Fatalf("got %q, want bob", got)
+		}
+	})
+
+	t.Run("none", func(t *testing.T) {
+		a := &agentService{authMode: "none"}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("X-SlotMachine-User", "bob")
+		if got := a.extractUser(r); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+}
+
+func TestTitlePattern(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input     string
+		wantTitle string
+		wantClean string
+	}{
+		{"[[TITLE: Hello World]]\nSome text", "Hello World", "Some text"},
+		{"Some text [[TITLE: Updated]] more text", "Updated", "Some text  more text"},
+		{"No title here", "", "No title here"},
+		{"[[TITLE: Just a title]]", "Just a title", ""},
+	}
+
+	for _, tt := range tests {
+		m := titlePattern.FindStringSubmatch(tt.input)
+		if tt.wantTitle == "" {
+			if m != nil {
+				t.Errorf("input=%q: expected no match, got %v", tt.input, m)
+			}
+			continue
+		}
+		if m == nil {
+			t.Errorf("input=%q: expected match", tt.input)
+			continue
+		}
+		if got := strings.TrimSpace(m[1]); got != tt.wantTitle {
+			t.Errorf("input=%q: title=%q, want %q", tt.input, got, tt.wantTitle)
+		}
+		clean := strings.TrimSpace(titlePattern.ReplaceAllString(tt.input, ""))
+		if clean != tt.wantClean {
+			t.Errorf("input=%q: clean=%q, want %q", tt.input, clean, tt.wantClean)
+		}
+	}
+}
+
+func TestBuildSystemPrompt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("without agent.md", func(t *testing.T) {
+		a := &agentService{stagingDir: t.TempDir()}
+		prompt := a.buildSystemPrompt()
+		if !strings.Contains(prompt, "slot-machine") {
+			t.Fatal("missing slot-machine mention")
+		}
+		if !strings.Contains(prompt, "[[TITLE:") {
+			t.Fatal("missing titling instruction")
+		}
+	})
+
+	t.Run("with agent.md", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "agent.md"), []byte("Custom app context.\n"), 0644)
+		a := &agentService{stagingDir: dir}
+		prompt := a.buildSystemPrompt()
+		if !strings.Contains(prompt, "Custom app context.") {
+			t.Fatal("missing agent.md content")
+		}
+	})
 }
 
 func contains(s, substr string) bool {

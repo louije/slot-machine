@@ -38,7 +38,11 @@ func main() {
 	// Assistant events at interval.
 	for i := 0; i < *duration; i++ {
 		time.Sleep(time.Duration(*interval) * time.Millisecond)
-		fmt.Fprintf(os.Stdout, "{\"type\":\"assistant\",\"text\":\"working on: %s (%d/%d)\"}\n", *prompt, i+1, *duration)
+		text := fmt.Sprintf("working on: %s (%d/%d)", *prompt, i+1, *duration)
+		if i == 0 {
+			text = fmt.Sprintf("[[TITLE: %s]]\n%s", *prompt, text)
+		}
+		fmt.Fprintf(os.Stdout, "{\"type\":\"assistant\",\"text\":%q}\n", text)
 	}
 
 	// Result event.
