@@ -80,6 +80,10 @@ html,body{height:100%;overflow:hidden;font-family:var(--sm-font);font-size:var(-
 .sm-msg-content li{margin-bottom:4px}
 .sm-msg-content strong{font-weight:600}
 .sm-msg-content em{font-style:italic}
+.sm-msg-content table{border-collapse:collapse;margin:8px 0;width:100%;overflow-x:auto;display:block;font-size:0.92em}
+.sm-msg-content th,.sm-msg-content td{border:1px solid var(--sm-border);padding:6px 10px;text-align:left}
+.sm-msg-content th{background:var(--sm-bg-secondary);font-weight:600}
+.sm-msg-content tr:nth-child(even){background:var(--sm-bg-secondary)}
 .sm-tool{margin:8px 0;border:1px solid var(--sm-tool-border);border-radius:var(--sm-radius);background:var(--sm-tool-bg);overflow:hidden}
 .sm-tool-header{display:flex;align-items:center;gap:6px;padding:8px 12px;cursor:pointer;font-size:13px;color:var(--sm-tool-text);font-weight:500;user-select:none}
 .sm-tool-header:hover{opacity:0.8}
@@ -232,6 +236,28 @@ function md(text) {
     var i = blocks.length;
     blocks.push('<pre><code'+(lang?' class="lang-'+lang+'"':'')+'>'+code.replace(/\n$/,'')+'</code></pre>');
     return '\x00CODEBLOCK'+i+'\x00';
+  });
+  // Tables — detect lines with pipes, separator row with dashes
+  text = text.replace(/(?:^|\n)((?:\|.+\|[ \t]*\n)+)/g, function(_, block) {
+    var rows = block.trim().split('\n');
+    if (rows.length < 2) return _;
+    // Check if second row is separator (|---|---|)
+    var sep = rows[1];
+    if (!/^\|[\s\-:|]+\|$/.test(sep.trim())) return _;
+    var html = '<table>';
+    // Header
+    var hCells = rows[0].split('|').filter(function(c,i,a){return i>0&&i<a.length-1});
+    html += '<thead><tr>' + hCells.map(function(c){return '<th>'+c.trim()+'</th>'}).join('') + '</tr></thead>';
+    // Body
+    html += '<tbody>';
+    for (var r = 2; r < rows.length; r++) {
+      var cells = rows[r].split('|').filter(function(c,i,a){return i>0&&i<a.length-1});
+      html += '<tr>' + cells.map(function(c){return '<td>'+c.trim()+'</td>'}).join('') + '</tr>';
+    }
+    html += '</tbody></table>';
+    var idx = blocks.length;
+    blocks.push(html);
+    return '\x00CODEBLOCK'+idx+'\x00';
   });
   // Inline code
   text = text.replace(/`([^`\n]+)`/g, '<code>$1</code>');
@@ -397,6 +423,13 @@ function connectSSE(convId) {
   });
 
   evtSource.addEventListener('done', function(e) {
+    // If no assistant chunks were streamed, extract result text from done event.
+    if (!currentAssistantEl) {
+      try {
+        var d = JSON.parse(e.data);
+        if (d.result) appendMessage('assistant', md(d.result));
+      } catch(err){}
+    }
     finalizeAssistant();
     setStreaming(false);
     if (evtSource) { evtSource.close(); evtSource = null; }
@@ -482,6 +515,7 @@ async function loadConversation(id, silent) {
 }
 
 function renderStoredMessages(msgs) {
+  var hasAssistant = msgs.some(function(m) { return m.type === 'assistant'; });
   msgs.forEach(function(m) {
     if (m.type === 'user') {
       appendMessage('user', md(m.content));
@@ -502,6 +536,11 @@ function renderStoredMessages(msgs) {
       try {
         var d = JSON.parse(m.content);
         fillToolResult(d.id, d.output);
+      } catch(e){}
+    } else if (m.type === 'done') {
+      try {
+        var d = JSON.parse(m.content);
+        if (d.result && !hasAssistant) appendMessage('assistant', md(d.result));
       } catch(e){}
     } else if (m.type === 'system' && state.settings.sysVis === 'show') {
       appendMessage('system', 'System event');

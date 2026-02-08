@@ -153,6 +153,7 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 	if err := o.prepareSlot(stagingDir, commit); err != nil {
 		return deployResponse{Error: err.Error()}, 500
 	}
+	o.applySharedDirs(stagingDir)
 
 	// 2. Run setup command.
 	appPort, err := findFreePort()
@@ -184,7 +185,7 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 	}
 
 	// 5. Healthy — promote.
-	slotName := fmt.Sprintf("slot-%s", commit[:8])
+	slotName := fmt.Sprintf("slot-%s", shortHash(commit))
 	slotDir := filepath.Join(o.dataDir, slotName)
 
 	// GC old prev first (avoid name collision if re-deploying same commit).

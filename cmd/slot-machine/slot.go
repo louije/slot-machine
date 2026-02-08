@@ -45,7 +45,11 @@ func (o *orchestrator) runSetup(dir string, appPort, intPort int) error {
 func (o *orchestrator) buildEnv(appPort, intPort int) []string {
 	env := os.Environ()
 	if o.cfg.EnvFile != "" {
-		if extra, err := loadEnvFile(o.cfg.EnvFile); err == nil {
+		envPath := o.cfg.EnvFile
+		if !filepath.IsAbs(envPath) {
+			envPath = filepath.Join(o.repoDir, envPath)
+		}
+		if extra, err := loadEnvFile(envPath); err == nil {
 			env = append(env, extra...)
 		}
 	}

@@ -71,6 +71,7 @@ func (o *orchestrator) createStaging(srcDir, commit string) {
 	if err := cpCmd.Run(); err == nil {
 		// Fix git worktree metadata for the clone.
 		if o.fixClonedWorktree(dstDir, commit) == nil {
+			o.applySharedDirs(dstDir)
 			return
 		}
 		// Clone metadata repair failed — remove and fall back.
@@ -80,6 +81,8 @@ func (o *orchestrator) createStaging(srcDir, commit string) {
 	// Fallback: fresh worktree.
 	exec.Command("git", "-C", o.repoDir, "worktree", "prune").Run()
 	exec.Command("git", "-C", o.repoDir, "worktree", "add", "--detach", dstDir, commit).Run()
+
+	o.applySharedDirs(dstDir)
 }
 
 // fixClonedWorktree sets up proper git worktree metadata for a cloned directory.
@@ -114,7 +117,44 @@ func (o *orchestrator) fixClonedWorktree(wtDir, commit string) error {
 	// Write .git file in worktree.
 	os.WriteFile(gitFile, []byte("gitdir: "+absMetaDir+"\n"), 0644)
 
+	// Rebuild the index from HEAD so git status is clean.
+	cmd := exec.Command("git", "reset", "--quiet")
+	cmd.Dir = wtDir
+	cmd.Run()
+
 	return nil
+}
+
+// applySharedDirs replaces configured shared_dirs in slotDir with symlinks
+// to the canonical location in the source repo. This ensures all slots and
+// the staging dir share the same data — no duplicate state.
+func (o *orchestrator) applySharedDirs(slotDir string) {
+	if len(o.cfg.SharedDirs) == 0 {
+		return
+	}
+
+	for _, name := range o.cfg.SharedDirs {
+		name = filepath.Clean(name)
+		if name == "." || name == ".." || filepath.IsAbs(name) {
+			continue
+		}
+
+		target := filepath.Join(o.repoDir, name)
+		slotPath := filepath.Join(slotDir, name)
+
+		// Ensure the canonical location exists in the repo.
+		os.MkdirAll(target, 0755)
+
+		// Remove whatever is at slotPath (real dir from CoW clone, old symlink, etc).
+		os.RemoveAll(slotPath)
+
+		// Ensure parent dirs exist in slot.
+		os.MkdirAll(filepath.Dir(slotPath), 0755)
+
+		// Symlink slot → repo.
+		absTarget, _ := filepath.Abs(target)
+		os.Symlink(absTarget, slotPath)
+	}
 }
 
 func (o *orchestrator) removeWorktree(dir string) {

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -14,28 +16,22 @@ import (
 )
 
 type agentService struct {
-	store      *agentStore
-	mu         sync.Mutex
-	sessions   map[string]*agentSession // keyed by conversation ID
-	agentBin   string
-	stagingDir string
-	envFunc    func() []string
-	authMode   string // "hmac", "trusted", "none"
-	authSecret string // hex-encoded HMAC secret (for "hmac" mode)
-	chatTitle  string
-	chatAccent string
+	store          *agentStore
+	mu             sync.Mutex
+	sessions       map[string]*agentSession // keyed by conversation ID
+	agentBin       string
+	stagingDir     string
+	envFunc        func() []string
+	authMode     string   // "hmac", "trusted", "none"
+	authSecret   string   // hex-encoded HMAC secret (for "hmac" mode)
+	allowedTools []string // claude --allowed-tools
+	chatTitle      string
+	chatAccent     string
 }
 
 type agentSession struct {
-	events chan agentEvent
-	done   chan struct{}
-	cmd    *exec.Cmd
-}
-
-type agentEvent struct {
-	ID   int64  // message ID (for SSE reconnection)
-	Type string // SSE event type: system, assistant, tool_use, tool_result, done
-	Data string // SSE data (JSON)
+	done chan struct{}
+	cmd  *exec.Cmd
 }
 
 var titlePattern = regexp.MustCompile(`\[\[TITLE:\s*(.+?)\]\]`)
@@ -181,63 +177,7 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	a.mu.Lock()
-	if _, running := a.sessions[convID]; running {
-		a.mu.Unlock()
-		http.Error(w, "agent already running", 409)
-		return
-	}
-	session := &agentSession{
-		events: make(chan agentEvent, 100),
-		done:   make(chan struct{}),
-	}
-	a.sessions[convID] = session
-	a.mu.Unlock()
-
-	// Store user message first.
 	a.store.addMessage(convID, "user", msg.Content)
-
-	// Spawn agent process.
-	bin := a.agentBin
-	if bin == "" {
-		bin = "claude"
-	}
-
-	args := []string{
-		"--output-format", "stream-json",
-		"-p", msg.Content,
-		"--system-prompt", a.buildSystemPrompt(),
-	}
-	if conv.SessionID != "" {
-		args = append(args, "--resume", conv.SessionID)
-	}
-
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = a.stagingDir
-	if a.envFunc != nil {
-		cmd.Env = a.envFunc()
-	}
-	session.cmd = cmd
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		a.mu.Lock()
-		delete(a.sessions, convID)
-		a.mu.Unlock()
-		http.Error(w, "failed to create pipe", 500)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		a.mu.Lock()
-		delete(a.sessions, convID)
-		a.mu.Unlock()
-		http.Error(w, "failed to start agent", 500)
-		return
-	}
-
-	go a.processAgentOutput(convID, session, stdout, cmd)
-
 	w.WriteHeader(200)
 }
 
@@ -263,107 +203,248 @@ func (a *agentService) handleCancel(w http.ResponseWriter, r *http.Request, conv
 	w.WriteHeader(200)
 }
 
-func (a *agentService) processAgentOutput(convID string, session *agentSession, stdout io.ReadCloser, cmd *exec.Cmd) {
+func (a *agentService) streamAgentOutput(w http.ResponseWriter, flusher http.Flusher, r *http.Request, convID string, stdout io.ReadCloser, cmd *exec.Cmd) {
+	done := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB max line
+		for scanner.Scan() {
+			line := scanner.Text()
+			var raw map[string]any
+			if json.Unmarshal([]byte(line), &raw) != nil {
+				continue
+			}
+
+			evtType, _ := raw["type"].(string)
+			var sseType, sseData string
+
+			switch evtType {
+			case "system":
+				if sub, _ := raw["subtype"].(string); sub == "init" {
+					if sid, ok := raw["session_id"].(string); ok {
+						a.store.updateSessionID(convID, sid)
+					}
+				}
+				sseType = "system"
+				sseData = line
+
+			case "assistant":
+				// Extract content blocks from message.
+				// Real Claude: {"type":"assistant","message":{"content":[...]}}
+				// Content blocks can be text or tool_use.
+				var blocks []any
+				if msg, ok := raw["message"].(map[string]any); ok {
+					blocks, _ = msg["content"].([]any)
+				}
+
+				// Emit tool_use events for any tool calls in this message.
+				for _, b := range blocks {
+					block, ok := b.(map[string]any)
+					if !ok {
+						continue
+					}
+					if bt, _ := block["type"].(string); bt == "tool_use" {
+						toolName, _ := block["name"].(string)
+						toolID, _ := block["id"].(string)
+						data, _ := json.Marshal(map[string]string{"tool": toolName, "id": toolID})
+						msgID, _ := a.store.addMessage(convID, "tool_use", string(data))
+						fmt.Fprintf(w, "id: %d\nevent: tool_use\ndata: %s\n\n", msgID, string(data))
+						flusher.Flush()
+					}
+				}
+
+				// Collect text from all text blocks.
+				var text string
+				for _, b := range blocks {
+					block, ok := b.(map[string]any)
+					if !ok {
+						continue
+					}
+					if bt, _ := block["type"].(string); bt == "text" {
+						if t, _ := block["text"].(string); t != "" {
+							text += t
+						}
+					}
+				}
+
+				// Extract and strip [[TITLE: ...]] markers.
+				if m := titlePattern.FindStringSubmatch(text); m != nil {
+					a.store.updateTitle(convID, strings.TrimSpace(m[1]))
+					text = strings.TrimSpace(titlePattern.ReplaceAllString(text, ""))
+				}
+
+				if text == "" {
+					continue // tool-only or title-only message
+				}
+
+				data, _ := json.Marshal(map[string]string{"content": text})
+				sseType = "assistant"
+				sseData = string(data)
+
+			case "user":
+				// Tool results come as user events: {"type":"user","message":{"content":[{"type":"tool_result",...}]}}
+				var blocks []any
+				if msg, ok := raw["message"].(map[string]any); ok {
+					blocks, _ = msg["content"].([]any)
+				}
+				for _, b := range blocks {
+					block, ok := b.(map[string]any)
+					if !ok {
+						continue
+					}
+					if bt, _ := block["type"].(string); bt == "tool_result" {
+						toolID, _ := block["tool_use_id"].(string)
+						content, _ := block["content"].(string)
+						data, _ := json.Marshal(map[string]string{"id": toolID, "output": content})
+						msgID, _ := a.store.addMessage(convID, "tool_result", string(data))
+						fmt.Fprintf(w, "id: %d\nevent: tool_result\ndata: %s\n\n", msgID, string(data))
+						flusher.Flush()
+					}
+				}
+				continue
+
+			case "result":
+				// Usage is nested: {"usage":{"input_tokens":N,"output_tokens":N,...}}
+				var inputTok, outputTok, cacheRead, cacheWrite float64
+				if usage, ok := raw["usage"].(map[string]any); ok {
+					inputTok, _ = usage["input_tokens"].(float64)
+					outputTok, _ = usage["output_tokens"].(float64)
+					cacheRead, _ = usage["cache_read_input_tokens"].(float64)
+					cacheWrite, _ = usage["cache_creation_input_tokens"].(float64)
+				}
+				a.store.addUsage(convID, int(inputTok), int(outputTok), int(cacheRead), int(cacheWrite))
+
+				// Extract title from result text (may not appear in assistant events).
+				if resultText, _ := raw["result"].(string); resultText != "" {
+					if m := titlePattern.FindStringSubmatch(resultText); m != nil {
+						a.store.updateTitle(convID, strings.TrimSpace(m[1]))
+					}
+				}
+
+				sseType = "done"
+				sseData = line
+
+			default:
+				continue
+			}
+
+			// Database first, then SSE.
+			msgID, _ := a.store.addMessage(convID, sseType, sseData)
+			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", msgID, sseType, sseData)
+			flusher.Flush()
+		}
+		cmd.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-r.Context().Done():
+		cmd.Process.Kill()
+		cmd.Wait()
+	}
+}
+
+func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, convID string) {
+	// Verify conversation exists and get last user message.
+	conv, err := a.store.getConversation(convID)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if conv == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	msgs, err := a.store.getMessages(convID, 0)
+	if err != nil || len(msgs) == 0 {
+		http.Error(w, "no messages", 400)
+		return
+	}
+	// Find last user message.
+	var lastUserMsg string
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Type == "user" {
+			lastUserMsg = msgs[i].Content
+			break
+		}
+	}
+	if lastUserMsg == "" {
+		http.Error(w, "no user message", 400)
+		return
+	}
+
+	// Reject if agent already running for this conversation.
+	a.mu.Lock()
+	if _, running := a.sessions[convID]; running {
+		a.mu.Unlock()
+		http.Error(w, "agent already running", 409)
+		return
+	}
+	session := &agentSession{
+		done: make(chan struct{}),
+	}
+	a.sessions[convID] = session
+	a.mu.Unlock()
+
 	defer func() {
 		a.mu.Lock()
 		delete(a.sessions, convID)
 		a.mu.Unlock()
 		close(session.done)
-		close(session.events)
 	}()
 
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		var raw map[string]any
-		if json.Unmarshal([]byte(line), &raw) != nil {
-			continue
-		}
-
-		evtType, _ := raw["type"].(string)
-		var sseType, sseData string
-
-		switch evtType {
-		case "system":
-			if sub, _ := raw["subtype"].(string); sub == "init" {
-				if sid, ok := raw["session_id"].(string); ok {
-					a.store.updateSessionID(convID, sid)
-				}
-			}
-			sseType = "system"
-			sseData = line
-
-		case "assistant":
-			text, _ := raw["text"].(string)
-
-			// Extract and strip [[TITLE: ...]] markers.
-			if m := titlePattern.FindStringSubmatch(text); m != nil {
-				a.store.updateTitle(convID, strings.TrimSpace(m[1]))
-				text = strings.TrimSpace(titlePattern.ReplaceAllString(text, ""))
-			}
-
-			if text == "" {
-				continue // title-only message, nothing to forward
-			}
-
-			data, _ := json.Marshal(map[string]string{"content": text})
-			sseType = "assistant"
-			sseData = string(data)
-
-		case "result":
-			// Extract usage and accumulate on conversation.
-			inputTok, _ := raw["input_tokens"].(float64)
-			outputTok, _ := raw["output_tokens"].(float64)
-			cacheRead, _ := raw["cache_read"].(float64)
-			cacheWrite, _ := raw["cache_write"].(float64)
-			a.store.addUsage(convID, int(inputTok), int(outputTok), int(cacheRead), int(cacheWrite))
-
-			sseType = "done"
-			sseData = line // raw result JSON
-
-		case "content_block_start":
-			cb, _ := raw["content_block"].(map[string]any)
-			if cb == nil {
-				continue
-			}
-			if cbType, _ := cb["type"].(string); cbType != "tool_use" {
-				continue
-			}
-			toolName, _ := cb["name"].(string)
-			toolID, _ := cb["id"].(string)
-			data, _ := json.Marshal(map[string]string{"tool": toolName, "id": toolID})
-			sseType = "tool_use"
-			sseData = string(data)
-
-		case "tool_result":
-			toolID, _ := raw["tool_use_id"].(string)
-			content, _ := raw["content"].(string)
-			data, _ := json.Marshal(map[string]string{"id": toolID, "output": content})
-			sseType = "tool_result"
-			sseData = string(data)
-
-		default:
-			continue
-		}
-
-		// Database first, then SSE.
-		msgID, _ := a.store.addMessage(convID, sseType, sseData)
-		session.events <- agentEvent{ID: msgID, Type: sseType, Data: sseData}
+	// Spawn agent process.
+	bin := a.agentBin
+	if bin == "" {
+		bin = "claude"
 	}
-	cmd.Wait()
-}
+	tools := a.allowedTools
+	if len(tools) == 0 {
+		tools = []string{"Bash", "Edit", "Read", "Write", "Glob", "Grep"}
+	}
+	args := []string{
+		"--output-format", "stream-json",
+		"--allowed-tools", strings.Join(tools, ","),
+		"-p", lastUserMsg,
+		"--system-prompt", a.buildSystemPrompt(),
+	}
+	if conv.SessionID != "" {
+		args = append(args, "--resume", conv.SessionID)
+	}
 
-func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, convID string) {
-	a.mu.Lock()
-	session, ok := a.sessions[convID]
-	a.mu.Unlock()
-	if !ok {
-		http.NotFound(w, r)
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = a.stagingDir
+	if a.envFunc != nil {
+		cmd.Env = a.envFunc()
+	}
+	// Make the slot-machine binary available to the agent via PATH.
+	if self, err := os.Executable(); err == nil {
+		selfDir := filepath.Dir(self)
+		for i, e := range cmd.Env {
+			if strings.HasPrefix(e, "PATH=") {
+				cmd.Env[i] = "PATH=" + selfDir + ":" + e[5:]
+				break
+			}
+		}
+	}
+	session.cmd = cmd
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		http.Error(w, "failed to create pipe", 500)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		http.Error(w, "failed to start agent", 500)
 		return
 	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		cmd.Process.Kill()
+		cmd.Wait()
 		http.Error(w, "streaming not supported", 500)
 		return
 	}
@@ -374,16 +455,6 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 	w.WriteHeader(200)
 	flusher.Flush()
 
-	for {
-		select {
-		case evt, open := <-session.events:
-			if !open {
-				return
-			}
-			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", evt.ID, evt.Type, evt.Data)
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
-		}
-	}
+	// Stream agent output directly to client.
+	a.streamAgentOutput(w, flusher, r, convID, stdout, cmd)
 }

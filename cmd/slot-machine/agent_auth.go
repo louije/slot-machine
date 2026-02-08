@@ -33,24 +33,72 @@ func (a *agentService) extractUser(r *http.Request) string {
 	}
 }
 
+// agentMDCandidates is the priority order for agent instruction files.
+// First file found wins.
+var agentMDCandidates = []string{
+	"AGENTS.slot-machine.md",
+	"AGENTS.md",
+	"CLAUDE.md",
+}
+
+const systemPromptBase = `You are an AI assistant embedded in a web application via slot-machine.
+You are working in the application's source code directory. This is a git worktree managed by slot-machine — it tracks the same repo as the main checkout.
+
+## Environment
+
+- Your working directory is a staging copy of the deployed application.
+- The application is live and serving users from a separate slot directory.
+- Commits you make here are immediately available to slot-machine for deployment.
+
+## Making and deploying changes
+
+When you complete a task, commit and deploy:
+
+  git add <files>
+  git commit -m "description of change"
+  slot-machine deploy
+
+slot-machine deploy deploys the HEAD of this worktree. The old version keeps serving until the new one passes health checks — zero downtime.
+
+Commit freely — atomic, descriptive messages. Deploy when you believe the task is done.
+
+## Git notes
+
+- You are on a detached HEAD. Commits work fine.
+- To also push to a remote branch:
+  git checkout -b <branch-name>
+  git push -u origin <branch-name>
+
+## What you should NOT do
+
+- Do not restart or stop the running application directly.
+- Do not modify files outside this directory.
+- Do not install global packages or change system configuration.
+- Do not run slot-machine rollback unless the user asks.
+
+## Conversation titling
+
+Include a conversation title in your responses using this format on its own line:
+[[TITLE: short descriptive title]]
+Include this in your first response. You may include it again to update the title if the topic changes.
+`
+
 func (a *agentService) buildSystemPrompt() string {
 	var b strings.Builder
-	b.WriteString("You are an AI assistant embedded in a web application via slot-machine.\n")
-	b.WriteString("You are working in the application's source code directory.\n")
+	b.WriteString(systemPromptBase)
 
-	agentMD, err := os.ReadFile(filepath.Join(a.stagingDir, "agent.md"))
-	if err == nil && len(agentMD) > 0 {
-		b.WriteString("\n")
-		b.Write(agentMD)
-		if agentMD[len(agentMD)-1] != '\n' {
-			b.WriteString("\n")
+	// Load app-specific instructions: first file found wins.
+	for _, name := range agentMDCandidates {
+		data, err := os.ReadFile(filepath.Join(a.stagingDir, name))
+		if err == nil && len(data) > 0 {
+			b.WriteString("\n## App-specific instructions\n\n")
+			b.Write(data)
+			if data[len(data)-1] != '\n' {
+				b.WriteString("\n")
+			}
+			break
 		}
 	}
-
-	b.WriteString("\n## Conversation titling\n")
-	b.WriteString("Include a conversation title in your responses using this format on its own line:\n")
-	b.WriteString("[[TITLE: short descriptive title]]\n")
-	b.WriteString("Include this in your first response. You may include it again to update the title if the topic changes.\n")
 
 	return b.String()
 }

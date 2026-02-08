@@ -63,6 +63,9 @@ type StatusResponse struct {
 
 // freePort finds an available TCP port by binding to :0 and immediately closing.
 // The OS assigns an ephemeral port which is then released for use.
+//
+// Deprecated: use reservePorts instead to avoid port collisions between
+// parallel tests.
 func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -72,6 +75,31 @@ func freePort(t *testing.T) int {
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
 	return port
+}
+
+// reservePorts allocates n TCP ports and keeps the listeners open to prevent
+// other parallel tests from getting the same ports. Call the returned release
+// function immediately before starting the subprocess that needs to bind.
+func reservePorts(t *testing.T, n int) (ports []int, release func()) {
+	t.Helper()
+	listeners := make([]net.Listener, n)
+	ports = make([]int, n)
+	for i := 0; i < n; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			for j := 0; j < i; j++ {
+				listeners[j].Close()
+			}
+			t.Fatalf("reservePorts: %v", err)
+		}
+		listeners[i] = l
+		ports[i] = l.Addr().(*net.TCPAddr).Port
+	}
+	return ports, func() {
+		for _, l := range listeners {
+			l.Close()
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -251,9 +279,13 @@ func orchestratorBinary(t *testing.T) string {
 // startOrchestrator launches the orchestrator binary as a subprocess and waits
 // until its HTTP API is reachable. Returns a handle for stopping it later.
 //
+// If release is non-nil, it is called immediately before starting the process
+// to free reserved ports (see reservePorts).
+//
 // The orchestrator is started with:
-//   --config <contractPath> --repo <repoDir> --data <tempDataDir> --port <apiPort> --no-proxy
-func startOrchestrator(t *testing.T, binary, contractPath, repoDir string, apiPort int) *Orchestrator {
+//
+//	--config <contractPath> --repo <repoDir> --data <tempDataDir> --port <apiPort> --no-proxy
+func startOrchestrator(t *testing.T, binary, contractPath, repoDir string, apiPort int, release func()) *Orchestrator {
 	t.Helper()
 
 	dataDir := t.TempDir()
@@ -269,6 +301,9 @@ func startOrchestrator(t *testing.T, binary, contractPath, repoDir string, apiPo
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	if release != nil {
+		release()
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting orchestrator: %v", err)
 	}
@@ -502,7 +537,9 @@ func testagentBinary(t *testing.T) string {
 
 // startOrchestratorWithAgent launches the orchestrator with the agent binary
 // available via SLOT_MACHINE_AGENT_BIN env var. Used for agent/deploy-through tests.
-func startOrchestratorWithAgent(t *testing.T, binary, contractPath, repoDir string, apiPort int, agentBin string) *Orchestrator {
+//
+// If release is non-nil, it is called immediately before starting the process.
+func startOrchestratorWithAgent(t *testing.T, binary, contractPath, repoDir string, apiPort int, agentBin string, release func()) *Orchestrator {
 	t.Helper()
 
 	dataDir := t.TempDir()
@@ -519,6 +556,9 @@ func startOrchestratorWithAgent(t *testing.T, binary, contractPath, repoDir stri
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	if release != nil {
+		release()
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting orchestrator: %v", err)
 	}

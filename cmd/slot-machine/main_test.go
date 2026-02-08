@@ -22,6 +22,7 @@ func TestShortHash(t *testing.T) {
 	}{
 		{"abcdef1234567890", "abcdef12"},
 		{"abcdef12", "abcdef12"},
+		{"d4f80a3", "d4f80a3"}, // 7-char short hash (common git default)
 		{"abc", "abc"},
 		{"", ""},
 	}
@@ -491,7 +492,7 @@ func TestTitlePattern(t *testing.T) {
 func TestBuildSystemPrompt(t *testing.T) {
 	t.Parallel()
 
-	t.Run("without agent.md", func(t *testing.T) {
+	t.Run("no instruction files", func(t *testing.T) {
 		a := &agentService{stagingDir: t.TempDir()}
 		prompt := a.buildSystemPrompt()
 		if !strings.Contains(prompt, "slot-machine") {
@@ -502,13 +503,39 @@ func TestBuildSystemPrompt(t *testing.T) {
 		}
 	})
 
-	t.Run("with agent.md", func(t *testing.T) {
+	t.Run("AGENTS.slot-machine.md takes priority", func(t *testing.T) {
 		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, "agent.md"), []byte("Custom app context.\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "AGENTS.slot-machine.md"), []byte("Slot-specific.\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("Generic agent.\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("Project context.\n"), 0644)
 		a := &agentService{stagingDir: dir}
 		prompt := a.buildSystemPrompt()
-		if !strings.Contains(prompt, "Custom app context.") {
-			t.Fatal("missing agent.md content")
+		if !strings.Contains(prompt, "Slot-specific.") {
+			t.Fatal("expected AGENTS.slot-machine.md content")
+		}
+		if strings.Contains(prompt, "Generic agent.") {
+			t.Fatal("should not include AGENTS.md when AGENTS.slot-machine.md exists")
+		}
+	})
+
+	t.Run("AGENTS.md used when no slot-machine variant", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("Generic agent.\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("Project context.\n"), 0644)
+		a := &agentService{stagingDir: dir}
+		prompt := a.buildSystemPrompt()
+		if !strings.Contains(prompt, "Generic agent.") {
+			t.Fatal("expected AGENTS.md content")
+		}
+	})
+
+	t.Run("CLAUDE.md as last resort", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("Project context.\n"), 0644)
+		a := &agentService{stagingDir: dir}
+		prompt := a.buildSystemPrompt()
+		if !strings.Contains(prompt, "Project context.") {
+			t.Fatal("expected CLAUDE.md content")
 		}
 	})
 }
@@ -573,6 +600,197 @@ func TestChatServesStaticHTML(t *testing.T) {
 	if strings.Contains(body, "{{") {
 		t.Fatal("chat.html still contains template syntax")
 	}
+}
+
+func TestBuildEnvResolvesEnvFileRelativeToRepoDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=hunter2\n"), 0644)
+
+	o := &orchestrator{
+		cfg:     config{EnvFile: ".env"},
+		repoDir: dir,
+	}
+	env := o.buildEnv(3000, 3900)
+	found := false
+	for _, e := range env {
+		if e == "SECRET=hunter2" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected SECRET=hunter2 from .env resolved relative to repoDir")
+	}
+}
+
+func TestSendMessageOnlyStoresDoesNotStartAgent(t *testing.T) {
+	t.Parallel()
+	store, err := openAgentStore(filepath.Join(t.TempDir(), "agent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := &agentService{
+		store:    store,
+		sessions: make(map[string]*agentSession),
+		authMode: "none",
+	}
+
+	convID := "conv-store-test"
+	store.createConversation(convID, "test")
+
+	body := strings.NewReader(`{"content":"hello"}`)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/agent/conversations/"+convID+"/messages", body)
+	a.handleSendMessage(w, r, convID)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Message stored in DB.
+	msgs, _ := store.getMessages(convID, 0)
+	if len(msgs) != 1 || msgs[0].Type != "user" || msgs[0].Content != "hello" {
+		t.Fatalf("expected user message stored, got %+v", msgs)
+	}
+
+	// No session created — agent not started.
+	a.mu.Lock()
+	_, running := a.sessions[convID]
+	a.mu.Unlock()
+	if running {
+		t.Fatal("expected no session after POST /messages")
+	}
+}
+
+func TestStreamRejectsIfAgentAlreadyRunning(t *testing.T) {
+	t.Parallel()
+	store, err := openAgentStore(filepath.Join(t.TempDir(), "agent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := &agentService{
+		store:    store,
+		sessions: make(map[string]*agentSession),
+		authMode: "none",
+	}
+
+	convID := "conv-reject-test"
+	store.createConversation(convID, "test")
+	store.addMessage(convID, "user", "hello")
+
+	// Simulate an active session.
+	session := &agentSession{done: make(chan struct{})}
+	a.mu.Lock()
+	a.sessions[convID] = session
+	a.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/agent/conversations/"+convID+"/stream", nil)
+	a.handleStream(w, r, convID)
+
+	if w.Code != 409 {
+		t.Fatalf("expected 409 for concurrent stream, got %d", w.Code)
+	}
+}
+
+func TestApplySharedDirs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("symlinks slot dir to repo dir", func(t *testing.T) {
+		repoDir := t.TempDir()
+		slotDir := t.TempDir()
+
+		// Repo has the canonical data with a file.
+		os.MkdirAll(filepath.Join(repoDir, "data"), 0755)
+		os.WriteFile(filepath.Join(repoDir, "data", "test.db"), []byte("content"), 0644)
+
+		// Slot has a stale copy (from CoW clone).
+		os.MkdirAll(filepath.Join(slotDir, "data"), 0755)
+		os.WriteFile(filepath.Join(slotDir, "data", "stale.db"), []byte("stale"), 0644)
+
+		o := &orchestrator{
+			cfg:     config{SharedDirs: []string{"data"}},
+			repoDir: repoDir,
+		}
+		o.applySharedDirs(slotDir)
+
+		// Slot's data should now be a symlink.
+		info, err := os.Lstat(filepath.Join(slotDir, "data"))
+		if err != nil {
+			t.Fatalf("lstat: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("expected symlink")
+		}
+
+		// Slot should see the repo's file, not the stale copy.
+		content, _ := os.ReadFile(filepath.Join(slotDir, "data", "test.db"))
+		if string(content) != "content" {
+			t.Fatal("expected repo file through symlink")
+		}
+		if _, err := os.Stat(filepath.Join(slotDir, "data", "stale.db")); err == nil {
+			t.Fatal("stale file should not be visible")
+		}
+	})
+
+	t.Run("creates repo dir if missing", func(t *testing.T) {
+		repoDir := t.TempDir()
+		slotDir := t.TempDir()
+
+		o := &orchestrator{
+			cfg:     config{SharedDirs: []string{"data"}},
+			repoDir: repoDir,
+		}
+		o.applySharedDirs(slotDir)
+
+		// Repo's data dir should have been created.
+		info, err := os.Stat(filepath.Join(repoDir, "data"))
+		if err != nil || !info.IsDir() {
+			t.Fatal("expected repo data dir to be created")
+		}
+
+		// Slot should symlink to it.
+		info, _ = os.Lstat(filepath.Join(slotDir, "data"))
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("expected symlink")
+		}
+	})
+
+	t.Run("no shared dirs configured", func(t *testing.T) {
+		slotDir := t.TempDir()
+		os.MkdirAll(filepath.Join(slotDir, "data"), 0755)
+
+		o := &orchestrator{cfg: config{}}
+		o.applySharedDirs(slotDir)
+
+		// data should still be a real directory.
+		info, _ := os.Lstat(filepath.Join(slotDir, "data"))
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Fatal("should not create symlinks when not configured")
+		}
+	})
+
+	t.Run("ignores absolute and dot paths", func(t *testing.T) {
+		repoDir := t.TempDir()
+		slotDir := t.TempDir()
+
+		o := &orchestrator{
+			cfg:     config{SharedDirs: []string{"/etc", ".", ".."}},
+			repoDir: repoDir,
+		}
+		o.applySharedDirs(slotDir)
+
+		// No symlinks should have been created in the slot.
+		entries, _ := os.ReadDir(slotDir)
+		for _, e := range entries {
+			if e.Type()&os.ModeSymlink != 0 {
+				t.Fatalf("unexpected symlink: %s", e.Name())
+			}
+		}
+	})
 }
 
 func contains(s, substr string) bool {

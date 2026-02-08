@@ -69,14 +69,13 @@ func TestDeployHealthy(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy commit A.
@@ -113,14 +112,13 @@ func TestDeployUnhealthy(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy the "bad" commit — app starts with --start-unhealthy.
@@ -148,14 +146,13 @@ func TestDeployThenRollback(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy A, then B.
@@ -206,14 +203,13 @@ func TestOnlyOnePreviousSlot(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy A.
@@ -253,16 +249,15 @@ func TestRollbackNoPrevious(t *testing.T) {
 	t.Parallel()
 	bin := orchestratorBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	// We still need a valid repo and contract even though we won't deploy.
 	appBin := testappBinary(t)
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Attempt rollback with nothing deployed.
@@ -281,14 +276,13 @@ func TestConcurrentDeployRejected(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Start deploying the slow commit asynchronously.
@@ -323,14 +317,13 @@ func TestProcessCrashDetected(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy commit A.
@@ -369,16 +362,15 @@ func TestDrainTimeoutForceKill(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 
 	// Use a short drain timeout (1 second) so the test doesn't take forever.
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 1000)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy commit A.
@@ -416,9 +408,8 @@ func TestEnvFilePassedToApp(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 
@@ -440,7 +431,7 @@ func TestEnvFilePassedToApp(t *testing.T) {
 	contractPath := filepath.Join(contractDir, "app.contract.json")
 	os.WriteFile(contractPath, data, 0644)
 
-	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort, release)
 	_ = orch
 
 	dr, _ := deploy(t, apiPort, repo.CommitA)
@@ -471,14 +462,13 @@ func TestSlotMachineEnvVar(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	dr, _ := deploy(t, apiPort, repo.CommitA)
@@ -508,9 +498,8 @@ func TestSetupCommandRuns(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 
@@ -529,7 +518,7 @@ func TestSetupCommandRuns(t *testing.T) {
 	contractPath := filepath.Join(contractDir, "app.contract.json")
 	os.WriteFile(contractPath, data, 0644)
 
-	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort, release)
 
 	dr, _ := deploy(t, apiPort, repo.CommitA)
 	if !dr.Success {
@@ -552,9 +541,8 @@ func TestDaemonShutdownDrainsProcesses(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
@@ -572,6 +560,7 @@ func TestDaemonShutdownDrainsProcesses(t *testing.T) {
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	release()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting daemon: %v", err)
 	}
@@ -619,14 +608,13 @@ func TestZeroDowntime(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy commit A.
@@ -673,14 +661,13 @@ func TestStatusIncludesStagingDir(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	dr, _ := deploy(t, apiPort, repo.CommitA)
@@ -703,9 +690,8 @@ func TestStagingPreservesArtifacts(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 
@@ -723,7 +709,7 @@ func TestStagingPreservesArtifacts(t *testing.T) {
 	contractPath := filepath.Join(contractDir, "app.contract.json")
 	os.WriteFile(contractPath, data, 0644)
 
-	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort, release)
 
 	dr, _ := deploy(t, apiPort, repo.CommitA)
 	if !dr.Success {
@@ -747,14 +733,13 @@ func TestSymlinksOnDisk(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 
 	// Deploy A.
 	dr, _ := deploy(t, apiPort, repo.CommitA)
@@ -807,9 +792,8 @@ func TestDaemonRestart(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contractPath := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
@@ -847,6 +831,7 @@ func TestDaemonRestart(t *testing.T) {
 	}
 
 	// First run: deploy A.
+	release()
 	cmd1 := startDaemon()
 	waitForHealth(t, apiPort, 5*time.Second)
 
@@ -863,7 +848,7 @@ func TestDaemonRestart(t *testing.T) {
 	stopDaemon(cmd1)
 	time.Sleep(500 * time.Millisecond)
 
-	// Second run: same data dir — state should persist.
+	// Second run: same data dir — state should persist (ports already released).
 	cmd2 := startDaemon()
 	defer stopDaemon(cmd2)
 	waitForHealth(t, apiPort, 5*time.Second)
@@ -886,14 +871,13 @@ func TestGarbageCollection(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 
 	// Deploy A.
 	dr, _ := deploy(t, apiPort, repo.CommitA)
@@ -942,14 +926,13 @@ func TestRollbackThenDeploy(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy A, then B.
@@ -995,14 +978,13 @@ func TestRedeploySameCommit(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy A, then B.
@@ -1032,5 +1014,43 @@ func TestRedeploySameCommit(t *testing.T) {
 	}
 	if st.LiveSlot != expectedSlot {
 		t.Fatalf("expected live_slot=%s, got %s", expectedSlot, st.LiveSlot)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 26: Deploy with short commit hash
+// ---------------------------------------------------------------------------
+//
+// Git short hashes (7 chars) are common. The orchestrator must not panic
+// when the commit string is shorter than 8 characters.
+
+func TestDeployShortHash(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
+	_ = orch
+
+	// Deploy with a 7-char short hash (git's default).
+	shortCommit := repo.CommitA[:7]
+	dr, code := deploy(t, apiPort, shortCommit)
+	if code != 200 {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if !dr.Success {
+		t.Fatal("deploy with short hash failed")
+	}
+
+	// Slot name should use the short hash, not panic.
+	expectedSlot := fmt.Sprintf("slot-%s", shortCommit)
+	if dr.Slot != expectedSlot {
+		t.Fatalf("slot = %q, want %q", dr.Slot, expectedSlot)
 	}
 }

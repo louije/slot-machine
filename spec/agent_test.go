@@ -34,14 +34,13 @@ func TestProxyForwardsAppTraffic(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t) // proxy listens here
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy an app.
@@ -75,14 +74,13 @@ func TestProxyInterceptsAgentPaths(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t) // proxy listens here
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy so the proxy is active.
@@ -121,14 +119,13 @@ func TestProxyInterceptsChatPath(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy so the proxy is active.
@@ -179,14 +176,13 @@ func TestAgentSurvivesDeploy(t *testing.T) {
 	appBin := testappBinary(t)
 	agentBin := testagentBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t) // proxy listens here
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin)
+	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin, release)
 	_ = orch
 
 	// 1. Deploy app A.
@@ -310,14 +306,13 @@ func TestAutoTitling(t *testing.T) {
 	appBin := testappBinary(t)
 	agentBin := testagentBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin)
+	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin, release)
 	_ = orch
 
 	// Deploy so the agent service is active.
@@ -447,15 +442,14 @@ func TestHMACAuthRejectsUnauthenticated(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	// Write a contract with hmac auth (the default — just omit agent_auth).
 	contract := writeTestContractWithAuth(t, t.TempDir(), appPort, intPort, 0, "hmac")
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	// Deploy so the proxy is active.
@@ -501,14 +495,13 @@ func TestToolEventsForwardedThroughSSE(t *testing.T) {
 	appBin := testappBinary(t)
 	agentBin := testagentBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin)
+	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin, release)
 	_ = orch
 
 	dr, _ := deploy(t, apiPort, repo.CommitA)
@@ -634,14 +627,13 @@ func TestChatPageServesFullHTML(t *testing.T) {
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
 
-	apiPort := freePort(t)
-	appPort := freePort(t)
-	intPort := freePort(t)
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
 	dr, _ := deploy(t, apiPort, repo.CommitA)
