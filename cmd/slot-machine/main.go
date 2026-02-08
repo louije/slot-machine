@@ -132,6 +132,15 @@ func cmdStart(args []string) {
 		sessions:   make(map[string]*agentSession),
 		agentBin:   os.Getenv("SLOT_MACHINE_AGENT_BIN"),
 		stagingDir: filepath.Join(*dataDir, "slot-staging"),
+		envFunc: func() []string {
+			env := os.Environ()
+			if cfg.EnvFile != "" {
+				if extra, err := loadEnvFile(cfg.EnvFile); err == nil {
+					env = append(env, extra...)
+				}
+			}
+			return env
+		},
 	}
 
 	o := &orchestrator{

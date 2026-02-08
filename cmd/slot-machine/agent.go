@@ -68,6 +68,8 @@ func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.handleSendMessage(w, r, convID)
 	case "stream":
 		a.handleStream(w, r, convID)
+	case "cancel":
+		a.handleCancel(w, r, convID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -213,6 +215,28 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 	}
 
 	go a.processAgentOutput(convID, session, stdout, cmd)
+
+	w.WriteHeader(200)
+}
+
+func (a *agentService) handleCancel(w http.ResponseWriter, r *http.Request, convID string) {
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+
+	a.mu.Lock()
+	session, ok := a.sessions[convID]
+	a.mu.Unlock()
+	if !ok {
+		http.Error(w, "no running agent", 404)
+		return
+	}
+
+	if session.cmd != nil && session.cmd.Process != nil {
+		session.cmd.Process.Kill()
+	}
+	<-session.done
 
 	w.WriteHeader(200)
 }
