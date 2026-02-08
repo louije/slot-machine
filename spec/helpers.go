@@ -538,6 +538,37 @@ func startOrchestratorWithAgent(t *testing.T, binary, contractPath, repoDir stri
 	return orch
 }
 
+// writeTestContractWithAuth is like writeTestContract but allows specifying the auth mode.
+func writeTestContractWithAuth(t *testing.T, dir string, port, internalPort, drainTimeoutMs int, authMode string) string {
+	t.Helper()
+
+	if drainTimeoutMs == 0 {
+		drainTimeoutMs = 2000
+	}
+
+	contract := map[string]any{
+		"start_command":     "./start.sh",
+		"port":              port,
+		"internal_port":     internalPort,
+		"health_endpoint":   "/healthz",
+		"health_timeout_ms": 3000,
+		"drain_timeout_ms":  drainTimeoutMs,
+		"agent_auth":        authMode,
+	}
+
+	data, err := json.MarshalIndent(contract, "", "  ")
+	if err != nil {
+		t.Fatalf("marshaling contract: %v", err)
+	}
+
+	path := filepath.Join(dir, "app.contract.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("writing contract: %v", err)
+	}
+
+	return path
+}
+
 // httpPost sends a POST to the given URL and returns the status code.
 func httpPost(t *testing.T, url string) int {
 	t.Helper()

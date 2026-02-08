@@ -294,3 +294,196 @@ func TestAgentSurvivesDeploy(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test 30: Auto-titling extracts [[TITLE:...]] from agent output
+// ---------------------------------------------------------------------------
+//
+// The testagent emits [[TITLE: <prompt>]] in its first assistant message.
+// The orchestrator should:
+//   1. Strip the [[TITLE:...]] from the SSE stream data
+//   2. Store the extracted title in the database (visible via GET conversation)
+
+func TestAutoTitling(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+	agentBin := testagentBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
+
+	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin)
+	_ = orch
+
+	// Deploy so the agent service is active.
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy failed")
+	}
+
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", appPort)
+
+	// Create a conversation.
+	resp, err := http.Post(proxyURL+"/agent/conversations", "application/json", nil)
+	if err != nil {
+		t.Fatalf("creating conversation: %v", err)
+	}
+	var conv struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(resp.Body).Decode(&conv)
+	resp.Body.Close()
+	if conv.ID == "" {
+		t.Fatal("expected conversation ID")
+	}
+
+	// Send a message to start the agent.
+	msgBody, _ := json.Marshal(map[string]string{"content": "fix the login bug"})
+	resp, err = http.Post(
+		fmt.Sprintf("%s/agent/conversations/%s/messages", proxyURL, conv.ID),
+		"application/json",
+		bytes.NewReader(msgBody),
+	)
+	if err != nil {
+		t.Fatalf("sending message: %v", err)
+	}
+	resp.Body.Close()
+
+	// Open SSE stream and collect events.
+	sseClient := &http.Client{Timeout: 0}
+	sseResp, err := sseClient.Get(fmt.Sprintf("%s/agent/conversations/%s/stream", proxyURL, conv.ID))
+	if err != nil {
+		t.Fatalf("opening SSE stream: %v", err)
+	}
+	defer sseResp.Body.Close()
+
+	// Read all SSE data lines until stream closes or timeout.
+	type sseEvent struct {
+		eventType string
+		data      string
+	}
+	events := make(chan sseEvent, 100)
+	go func() {
+		scanner := bufio.NewScanner(sseResp.Body)
+		var currentEvent string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "event:") {
+				currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			} else if strings.HasPrefix(line, "data:") {
+				events <- sseEvent{
+					eventType: currentEvent,
+					data:      strings.TrimSpace(strings.TrimPrefix(line, "data:")),
+				}
+			}
+		}
+		close(events)
+	}()
+
+	// Collect all assistant data lines. Verify none contain [[TITLE:...]].
+	deadline := time.After(15 * time.Second)
+	var assistantDataLines []string
+	done := false
+	for !done {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				done = true
+				break
+			}
+			if ev.eventType == "assistant" {
+				assistantDataLines = append(assistantDataLines, ev.data)
+			}
+			if ev.eventType == "done" {
+				done = true
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for SSE events")
+		}
+	}
+
+	// None of the SSE data lines should contain [[TITLE:...]].
+	for _, line := range assistantDataLines {
+		if strings.Contains(line, "[[TITLE:") {
+			t.Fatalf("SSE stream should not contain [[TITLE:...]] marker, got: %s", line)
+		}
+	}
+
+	// GET the conversation — the title should have been extracted and stored.
+	code, body := httpGet(t, fmt.Sprintf("%s/agent/conversations/%s", proxyURL, conv.ID))
+	if code != 200 {
+		t.Fatalf("expected 200 for GET conversation, got %d", code)
+	}
+
+	// Parse the response to find the title.
+	var convResp struct {
+		Conversation struct {
+			Title string `json:"title"`
+		} `json:"conversation"`
+	}
+	if err := json.Unmarshal([]byte(body), &convResp); err != nil {
+		t.Fatalf("parsing conversation response: %v", err)
+	}
+	if convResp.Conversation.Title != "fix the login bug" {
+		t.Fatalf("expected title %q, got %q", "fix the login bug", convResp.Conversation.Title)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test 31: HMAC auth rejects unauthenticated requests
+// ---------------------------------------------------------------------------
+//
+// When agent_auth is "hmac" (default), requests to /agent/* without a valid
+// X-SlotMachine-User header should get 401. The /chat path should still be
+// accessible (it's a static HTML page, not an API).
+
+func TestHMACAuthRejectsUnauthenticated(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	apiPort := freePort(t)
+	appPort := freePort(t)
+	intPort := freePort(t)
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	// Write a contract with hmac auth (the default — just omit agent_auth).
+	contract := writeTestContractWithAuth(t, t.TempDir(), appPort, intPort, 0, "hmac")
+
+	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort)
+	_ = orch
+
+	// Deploy so the proxy is active.
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success {
+		t.Fatal("deploy failed")
+	}
+
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", appPort)
+
+	// GET /agent/conversations without auth header — should be 401.
+	code, _ := httpGet(t, proxyURL+"/agent/conversations")
+	if code != 401 {
+		t.Fatalf("expected 401 for unauthenticated GET /agent/conversations, got %d", code)
+	}
+
+	// POST /agent/conversations without auth header — should be 401.
+	postCode := httpPost(t, proxyURL+"/agent/conversations")
+	if postCode != 401 {
+		t.Fatalf("expected 401 for unauthenticated POST /agent/conversations, got %d", postCode)
+	}
+
+	// GET /chat should still return 200 HTML (not auth-protected).
+	code, body := httpGet(t, proxyURL+"/chat")
+	if code != 200 {
+		t.Fatalf("expected 200 for /chat, got %d", code)
+	}
+	if !strings.Contains(body, "<html") {
+		t.Fatalf("expected HTML for /chat, got: %s", body)
+	}
+}
