@@ -28,6 +28,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
+          gh release delete "$tag" --yes 2>/dev/null || true
           gh release create "$tag" --generate-notes \
             slot-machine-linux-amd64 \
             slot-machine-darwin-arm64

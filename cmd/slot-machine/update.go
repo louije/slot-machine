@@ -18,12 +18,15 @@ type ghRelease struct {
 }
 
 type ghAsset struct {
-	Name               string `json:"name"`
-	BrowserDownloadURL string `json:"browser_download_url"`
+	Name string `json:"name"`
+	URL  string `json:"url"` // API URL — serves binary with Accept: application/octet-stream
 }
 
 func cmdUpdate() {
-	resp, err := http.Get(releaseURL)
+	req, _ := http.NewRequest("GET", releaseURL, nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "slot-machine/"+Version)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot reach GitHub: %v\n", err)
 		os.Exit(1)
@@ -39,8 +42,13 @@ func cmdUpdate() {
 		os.Exit(1)
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: reading response: %v\n", err)
+		os.Exit(1)
+	}
 	var rel ghRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	if err := json.Unmarshal(body, &rel); err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot parse release: %v\n", err)
 		os.Exit(1)
 	}
@@ -51,14 +59,14 @@ func cmdUpdate() {
 	}
 
 	wantName := fmt.Sprintf("slot-machine-%s-%s", runtime.GOOS, runtime.GOARCH)
-	var downloadURL string
+	var assetURL string
 	for _, a := range rel.Assets {
 		if a.Name == wantName {
-			downloadURL = a.BrowserDownloadURL
+			assetURL = a.URL
 			break
 		}
 	}
-	if downloadURL == "" {
+	if assetURL == "" {
 		fmt.Fprintf(os.Stderr, "error: no asset %q in release %s\n", wantName, rel.TagName)
 		os.Exit(1)
 	}
@@ -71,7 +79,10 @@ func cmdUpdate() {
 	}
 	self, _ = filepath.EvalSymlinks(self)
 
-	dlResp, err := http.Get(downloadURL)
+	dlReq, _ := http.NewRequest("GET", assetURL, nil)
+	dlReq.Header.Set("Accept", "application/octet-stream")
+	dlReq.Header.Set("User-Agent", "slot-machine/"+Version)
+	dlResp, err := http.DefaultClient.Do(dlReq)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: download failed: %v\n", err)
 		os.Exit(1)
