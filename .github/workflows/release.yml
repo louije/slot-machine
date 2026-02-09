@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build binaries
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          ldflags="-X main.Version=$tag"
+          GOOS=linux  GOARCH=amd64 go build -ldflags="$ldflags" -o slot-machine-linux-amd64  ./cmd/slot-machine/
+          GOOS=darwin GOARCH=arm64 go build -ldflags="$ldflags" -o slot-machine-darwin-arm64 ./cmd/slot-machine/
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" --generate-notes \
+            slot-machine-linux-amd64 \
+            slot-machine-darwin-arm64

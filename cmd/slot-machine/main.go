@@ -8,6 +8,7 @@
 //	slot-machine rollback              # tell running daemon to rollback
 //	slot-machine status                # get status from running daemon
 //	slot-machine install               # copy binary to ~/.local/bin
+//	slot-machine update                # update to latest GitHub release
 //
 // Build:
 //
@@ -29,6 +30,9 @@ import (
 	"syscall"
 )
 
+// Version is injected at build time via -ldflags="-X main.Version=v1.0.0".
+var Version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: slot-machine <command> [args]")
@@ -40,6 +44,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  rollback   rollback to previous")
 		fmt.Fprintln(os.Stderr, "  status     show current status")
 		fmt.Fprintln(os.Stderr, "  install    copy binary to ~/.local/bin")
+		fmt.Fprintln(os.Stderr, "  update     update to latest GitHub release")
 		fmt.Fprintln(os.Stderr, "  version    print version info")
 		os.Exit(1)
 	}
@@ -57,8 +62,10 @@ func main() {
 		cmdStatus()
 	case "install":
 		cmdInstall()
+	case "update":
+		cmdUpdate()
 	case "version":
-		fmt.Println("slot-machine (go)")
+		fmt.Println(Version)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		os.Exit(1)

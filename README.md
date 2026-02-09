@@ -10,6 +10,7 @@ slot-machine deploy        # deploy HEAD (or a specific commit)
 slot-machine rollback      # swap back to previous slot
 slot-machine status        # what's running
 slot-machine install       # copy binary to ~/.local/bin
+slot-machine update        # update to latest GitHub release
 ```
 
 ## How it works
