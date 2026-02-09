@@ -142,8 +142,16 @@ func (o *orchestrator) applySharedDirs(slotDir string) {
 		target := filepath.Join(o.repoDir, name)
 		slotPath := filepath.Join(slotDir, name)
 
-		// Ensure the canonical location exists in the repo.
-		os.MkdirAll(target, 0755)
+		// If the canonical location doesn't exist yet, seed it from the slot's
+		// checkout (first deploy) rather than creating an empty directory.
+		if _, err := os.Lstat(target); os.IsNotExist(err) {
+			if info, err := os.Lstat(slotPath); err == nil && info.IsDir() {
+				os.MkdirAll(filepath.Dir(target), 0755)
+				os.Rename(slotPath, target)
+			} else {
+				os.MkdirAll(target, 0755)
+			}
+		}
 
 		// Remove whatever is at slotPath (real dir from CoW clone, old symlink, etc).
 		os.RemoveAll(slotPath)

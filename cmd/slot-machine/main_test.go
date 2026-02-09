@@ -736,7 +736,34 @@ func TestApplySharedDirs(t *testing.T) {
 		}
 	})
 
-	t.Run("creates repo dir if missing", func(t *testing.T) {
+	t.Run("seeds repo dir from slot checkout on first deploy", func(t *testing.T) {
+		repoDir := t.TempDir()
+		slotDir := t.TempDir()
+
+		// Slot has data from the git checkout (first deploy).
+		os.MkdirAll(filepath.Join(slotDir, "data"), 0755)
+		os.WriteFile(filepath.Join(slotDir, "data", "seed.db"), []byte("seeded"), 0644)
+
+		o := &orchestrator{
+			cfg:     config{SharedDirs: []string{"data"}},
+			repoDir: repoDir,
+		}
+		o.applySharedDirs(slotDir)
+
+		// Repo's data dir should contain the seeded file.
+		content, err := os.ReadFile(filepath.Join(repoDir, "data", "seed.db"))
+		if err != nil || string(content) != "seeded" {
+			t.Fatal("expected repo data dir to be seeded from slot checkout")
+		}
+
+		// Slot should symlink to it.
+		info, _ := os.Lstat(filepath.Join(slotDir, "data"))
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("expected symlink")
+		}
+	})
+
+	t.Run("creates empty repo dir if slot has no data", func(t *testing.T) {
 		repoDir := t.TempDir()
 		slotDir := t.TempDir()
 
@@ -746,7 +773,7 @@ func TestApplySharedDirs(t *testing.T) {
 		}
 		o.applySharedDirs(slotDir)
 
-		// Repo's data dir should have been created.
+		// Repo's data dir should have been created (empty).
 		info, err := os.Stat(filepath.Join(repoDir, "data"))
 		if err != nil || !info.IsDir() {
 			t.Fatal("expected repo data dir to be created")
