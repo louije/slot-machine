@@ -419,12 +419,20 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 	if a.envFunc != nil {
 		cmd.Env = a.envFunc()
 	}
-	// Make the slot-machine binary available to the agent via PATH.
+	// Prepend useful directories to PATH: the slot-machine binary's dir
+	// and ~/.local/bin (common user-local install location for claude).
+	var extraPath []string
 	if self, err := os.Executable(); err == nil {
-		selfDir := filepath.Dir(self)
+		extraPath = append(extraPath, filepath.Dir(self))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		extraPath = append(extraPath, filepath.Join(home, ".local", "bin"))
+	}
+	if len(extraPath) > 0 {
+		prefix := strings.Join(extraPath, ":")
 		for i, e := range cmd.Env {
 			if strings.HasPrefix(e, "PATH=") {
-				cmd.Env[i] = "PATH=" + selfDir + ":" + e[5:]
+				cmd.Env[i] = "PATH=" + prefix + ":" + e[5:]
 				break
 			}
 		}
