@@ -60,6 +60,7 @@ html,body{height:100%;overflow:hidden;font-family:var(--sm-font);font-size:var(-
 #sm-header h1{font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sm-icon-btn{background:none;border:none;color:var(--sm-text-secondary);cursor:pointer;padding:6px;border-radius:6px;font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center}
 .sm-icon-btn:hover{background:var(--sm-bg-tertiary)}
+a.sm-icon-btn{text-decoration:none}
 #sm-messages{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:16px}
 .sm-msg{margin-bottom:16px;max-width:100%}
 .sm-msg-role{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--sm-text-secondary);margin-bottom:4px}
@@ -95,7 +96,8 @@ html,body{height:100%;overflow:hidden;font-family:var(--sm-font);font-size:var(-
 .sm-tool-output{margin-top:8px;padding-top:8px;border-top:1px dashed var(--sm-tool-border)}
 #sm-status{padding:4px 16px 8px;font-size:13px;color:var(--sm-text-secondary);flex-shrink:0;min-height:0}
 #sm-status:empty{padding:0}
-#sm-input-area{display:flex;align-items:flex-end;gap:8px;padding:8px 16px;padding-bottom:calc(8px + var(--sm-safe-bottom));border-top:1px solid var(--sm-border);background:var(--sm-bg);flex-shrink:0}
+#sm-input-area{display:flex;align-items:flex-end;gap:6px;padding:8px 16px;padding-bottom:calc(8px + var(--sm-safe-bottom));border-top:1px solid var(--sm-border);background:var(--sm-bg);flex-shrink:0}
+#sm-input-area .sm-icon-btn{flex-shrink:0;margin-bottom:6px}
 #sm-input{flex:1;font-family:var(--sm-font);font-size:16px;line-height:1.4;padding:10px 12px;border:1px solid var(--sm-border);border-radius:var(--sm-radius);background:var(--sm-bg);color:var(--sm-text);resize:none;max-height:120px;outline:none}
 #sm-input:focus{border-color:var(--sm-accent)}
 #sm-input::placeholder{color:var(--sm-text-secondary)}
@@ -134,13 +136,14 @@ html,body{height:100%;overflow:hidden;font-family:var(--sm-font);font-size:var(-
 <body>
 <div id="sm-app">
   <div id="sm-header">
-    <button class="sm-icon-btn" id="sm-conv-btn" title="Conversations">&#9776;</button>
+    <a class="sm-icon-btn" href="/" title="Back to app">&#8592;</a>
     <h1 id="sm-title">slot-machine</h1>
     <button class="sm-icon-btn" id="sm-settings-btn" title="Settings">&#9881;</button>
   </div>
   <div id="sm-messages"></div>
   <div id="sm-status"></div>
   <div id="sm-input-area">
+    <button class="sm-icon-btn" id="sm-conv-btn" title="Conversations">&#9776;</button>
     <textarea id="sm-input" rows="1" placeholder="Message..."></textarea>
     <button class="sm-send-btn" id="sm-send" title="Send">&#8593;</button>
   </div>
