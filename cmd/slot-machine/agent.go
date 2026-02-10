@@ -406,6 +406,7 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 	}
 	args := []string{
 		"--output-format", "stream-json",
+		"--verbose",
 		"--allowed-tools", strings.Join(tools, ","),
 		"-p", lastUserMsg,
 		"--system-prompt", a.buildSystemPrompt(),
@@ -414,22 +415,38 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 		args = append(args, "--resume", conv.SessionID)
 	}
 
+	// Build extra PATH entries: the slot-machine binary's dir and
+	// ~/.local/bin (common user-local install location for claude).
+	var extraDirs []string
+	if self, err := os.Executable(); err == nil {
+		extraDirs = append(extraDirs, filepath.Dir(self))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		extraDirs = append(extraDirs, filepath.Join(home, ".local", "bin"))
+	}
+
+	// exec.Command resolves the binary using the daemon's PATH, which under
+	// systemd won't include ~/.local/bin. Check extra dirs manually.
+	if filepath.Base(bin) == bin {
+		if _, err := exec.LookPath(bin); err != nil {
+			for _, dir := range extraDirs {
+				candidate := filepath.Join(dir, bin)
+				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+					bin = candidate
+					break
+				}
+			}
+		}
+	}
+
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = a.stagingDir
 	if a.envFunc != nil {
 		cmd.Env = a.envFunc()
 	}
-	// Prepend useful directories to PATH: the slot-machine binary's dir
-	// and ~/.local/bin (common user-local install location for claude).
-	var extraPath []string
-	if self, err := os.Executable(); err == nil {
-		extraPath = append(extraPath, filepath.Dir(self))
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		extraPath = append(extraPath, filepath.Join(home, ".local", "bin"))
-	}
-	if len(extraPath) > 0 {
-		prefix := strings.Join(extraPath, ":")
+	// Prepend extra dirs to the subprocess PATH too.
+	if len(extraDirs) > 0 {
+		prefix := strings.Join(extraDirs, ":")
 		for i, e := range cmd.Env {
 			if strings.HasPrefix(e, "PATH=") {
 				cmd.Env[i] = "PATH=" + prefix + ":" + e[5:]
@@ -445,6 +462,7 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 		return
 	}
 	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "agent start error: %v (bin=%s)\n", err, bin)
 		http.Error(w, "failed to start agent", 500)
 		return
 	}
