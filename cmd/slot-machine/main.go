@@ -150,22 +150,38 @@ func cmdStart(args []string) {
 	}
 	fmt.Printf("agent auth: %s\n", authMode)
 
+	if os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" {
+		fmt.Println("agent auth source: oauth token")
+	} else if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".claude", ".credentials.json")); err == nil {
+			fmt.Println("agent auth source: credentials file")
+		}
+	}
+
 	store, err := openAgentStore(filepath.Join(*dataDir, "agent.db"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error opening agent store: %v\n", err)
 		os.Exit(1)
 	}
 
+	mgr := newAgentManager(store)
+
+	if n, err := store.recoverInterrupted(); err == nil && n > 0 {
+		fmt.Printf("recovered %d interrupted agent sessions\n", n)
+	}
+
 	agent := &agentService{
-		store:      store,
-		sessions:   make(map[string]*agentSession),
-		agentBin:   os.Getenv("SLOT_MACHINE_AGENT_BIN"),
-		stagingDir: filepath.Join(*dataDir, "slot-staging"),
+		store:        store,
+		manager:      mgr,
+		agentBin:     os.Getenv("SLOT_MACHINE_AGENT_BIN"),
+		stagingDir:   filepath.Join(*dataDir, "slot-staging"),
+		configPath:   *configPath,
+		dataDir:      *dataDir,
 		authMode:     authMode,
 		authSecret:   authSecret,
 		allowedTools: cfg.AgentAllowedTools,
-		chatTitle:      cfg.ChatTitle,
-		chatAccent:     cfg.ChatAccent,
+		chatTitle:    cfg.ChatTitle,
+		chatAccent:   cfg.ChatAccent,
 		envFunc: func() []string {
 			env := os.Environ()
 			if cfg.EnvFile != "" {
@@ -216,6 +232,7 @@ func cmdStart(args []string) {
 	go func() {
 		<-sigCh
 		fmt.Println("\nshutting down...")
+		mgr.stop()
 		o.drainAll()
 		o.appProxy.shutdown()
 		o.intProxy.shutdown()

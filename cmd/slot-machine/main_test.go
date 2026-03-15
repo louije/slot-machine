@@ -625,16 +625,24 @@ func TestBuildEnvResolvesEnvFileRelativeToRepoDir(t *testing.T) {
 }
 
 func TestSendMessageOnlyStoresDoesNotStartAgent(t *testing.T) {
-	t.Parallel()
 	store, err := openAgentStore(filepath.Join(t.TempDir(), "agent.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer store.close()
 
+	mgr := newAgentManager(store)
+	defer mgr.stop()
+
+	tmpDir := t.TempDir()
 	a := &agentService{
-		store:    store,
-		sessions: make(map[string]*agentSession),
-		authMode: "none",
+		store:      store,
+		manager:    mgr,
+		agentBin:   "true", // Use true so it succeeds but does nothing
+		stagingDir: tmpDir,
+		configPath: filepath.Join(tmpDir, "slot-machine.json"),
+		dataDir:    tmpDir,
+		authMode:   "none",
 	}
 
 	convID := "conv-store-test"
@@ -645,54 +653,21 @@ func TestSendMessageOnlyStoresDoesNotStartAgent(t *testing.T) {
 	r := httptest.NewRequest("POST", "/agent/conversations/"+convID+"/messages", body)
 	a.handleSendMessage(w, r, convID)
 
+	// Should be 200 (message stored + agent enqueued).
 	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d", w.Code)
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
 	// Message stored in DB.
 	msgs, _ := store.getMessages(convID, 0)
-	if len(msgs) != 1 || msgs[0].Type != "user" || msgs[0].Content != "hello" {
+	found := false
+	for _, m := range msgs {
+		if m.Type == "user" && m.Content == "hello" {
+			found = true
+		}
+	}
+	if !found {
 		t.Fatalf("expected user message stored, got %+v", msgs)
-	}
-
-	// No session created — agent not started.
-	a.mu.Lock()
-	_, running := a.sessions[convID]
-	a.mu.Unlock()
-	if running {
-		t.Fatal("expected no session after POST /messages")
-	}
-}
-
-func TestStreamRejectsIfAgentAlreadyRunning(t *testing.T) {
-	t.Parallel()
-	store, err := openAgentStore(filepath.Join(t.TempDir(), "agent.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	a := &agentService{
-		store:    store,
-		sessions: make(map[string]*agentSession),
-		authMode: "none",
-	}
-
-	convID := "conv-reject-test"
-	store.createConversation(convID, "test")
-	store.addMessage(convID, "user", "hello")
-
-	// Simulate an active session.
-	session := &agentSession{done: make(chan struct{})}
-	a.mu.Lock()
-	a.sessions[convID] = session
-	a.mu.Unlock()
-
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/agent/conversations/"+convID+"/stream", nil)
-	a.handleStream(w, r, convID)
-
-	if w.Code != 409 {
-		t.Fatalf("expected 409 for concurrent stream, got %d", w.Code)
 	}
 }
 

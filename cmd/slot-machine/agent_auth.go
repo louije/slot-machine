@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -73,6 +74,7 @@ Commit freely — atomic, descriptive messages. Deploy when you believe the task
 
 - Do not restart or stop the running application directly.
 - Do not modify files outside this directory.
+- Do not modify slot-machine.json or any files outside this directory.
 - Do not install global packages or change system configuration.
 - Do not run slot-machine rollback unless the user asks.
 
@@ -101,4 +103,26 @@ func (a *agentService) buildSystemPrompt() string {
 	}
 
 	return b.String()
+}
+
+func (a *agentService) generateDenySettings() error {
+	settingsDir := filepath.Join(a.stagingDir, ".claude")
+	os.MkdirAll(settingsDir, 0755)
+
+	absConfig, _ := filepath.Abs(a.configPath)
+	absBin := filepath.Join(a.dataDir, ".local", "bin")
+
+	settings := map[string]any{
+		"permissions": map[string]any{
+			"deny": []string{
+				"Edit(" + absConfig + ")",
+				"Write(" + absConfig + ")",
+				"Edit(" + absBin + "/*)",
+				"Write(" + absBin + "/*)",
+			},
+		},
+	}
+
+	data, _ := json.MarshalIndent(settings, "", "  ")
+	return os.WriteFile(filepath.Join(settingsDir, "settings.json"), data, 0644)
 }

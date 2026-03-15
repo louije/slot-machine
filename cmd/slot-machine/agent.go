@@ -1,37 +1,29 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 )
 
 type agentService struct {
-	store          *agentStore
-	mu             sync.Mutex
-	sessions       map[string]*agentSession // keyed by conversation ID
-	agentBin       string
-	stagingDir     string
-	envFunc        func() []string
+	store        *agentStore
+	manager      *agentManager
+	agentBin     string
+	stagingDir   string
+	configPath   string
+	dataDir      string
+	envFunc      func() []string
 	authMode     string   // "hmac", "trusted", "none"
 	authSecret   string   // hex-encoded HMAC secret (for "hmac" mode)
 	allowedTools []string // claude --allowed-tools
-	chatTitle      string
-	chatAccent     string
-}
-
-type agentSession struct {
-	done chan struct{}
-	cmd  *exec.Cmd
+	chatTitle    string
+	chatAccent   string
 }
 
 var titlePattern = regexp.MustCompile(`\[\[TITLE:\s*(.+?)\]\]`)
@@ -166,7 +158,6 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Verify conversation exists.
 	conv, err := a.store.getConversation(convID)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -178,224 +169,11 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 	}
 
 	a.store.addMessage(convID, "user", msg.Content)
-	w.WriteHeader(200)
-}
 
-func (a *agentService) handleCancel(w http.ResponseWriter, r *http.Request, convID string) {
-	if r.Method != "POST" {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
+	// Generate deny rules before spawning agent.
+	a.generateDenySettings()
 
-	a.mu.Lock()
-	session, ok := a.sessions[convID]
-	a.mu.Unlock()
-	if !ok {
-		http.Error(w, "no running agent", 404)
-		return
-	}
-
-	if session.cmd != nil && session.cmd.Process != nil {
-		session.cmd.Process.Kill()
-	}
-	<-session.done
-
-	w.WriteHeader(200)
-}
-
-func (a *agentService) streamAgentOutput(w http.ResponseWriter, flusher http.Flusher, r *http.Request, convID string, stdout io.ReadCloser, cmd *exec.Cmd) {
-	done := make(chan struct{})
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB max line
-		for scanner.Scan() {
-			line := scanner.Text()
-			var raw map[string]any
-			if json.Unmarshal([]byte(line), &raw) != nil {
-				continue
-			}
-
-			evtType, _ := raw["type"].(string)
-			var sseType, sseData string
-
-			switch evtType {
-			case "system":
-				if sub, _ := raw["subtype"].(string); sub == "init" {
-					if sid, ok := raw["session_id"].(string); ok {
-						a.store.updateSessionID(convID, sid)
-					}
-				}
-				sseType = "system"
-				sseData = line
-
-			case "assistant":
-				// Extract content blocks from message.
-				// Real Claude: {"type":"assistant","message":{"content":[...]}}
-				// Content blocks can be text or tool_use.
-				var blocks []any
-				if msg, ok := raw["message"].(map[string]any); ok {
-					blocks, _ = msg["content"].([]any)
-				}
-
-				// Emit tool_use events for any tool calls in this message.
-				for _, b := range blocks {
-					block, ok := b.(map[string]any)
-					if !ok {
-						continue
-					}
-					if bt, _ := block["type"].(string); bt == "tool_use" {
-						toolName, _ := block["name"].(string)
-						toolID, _ := block["id"].(string)
-						data, _ := json.Marshal(map[string]string{"tool": toolName, "id": toolID})
-						msgID, _ := a.store.addMessage(convID, "tool_use", string(data))
-						fmt.Fprintf(w, "id: %d\nevent: tool_use\ndata: %s\n\n", msgID, string(data))
-						flusher.Flush()
-					}
-				}
-
-				// Collect text from all text blocks.
-				var text string
-				for _, b := range blocks {
-					block, ok := b.(map[string]any)
-					if !ok {
-						continue
-					}
-					if bt, _ := block["type"].(string); bt == "text" {
-						if t, _ := block["text"].(string); t != "" {
-							text += t
-						}
-					}
-				}
-
-				// Extract and strip [[TITLE: ...]] markers.
-				if m := titlePattern.FindStringSubmatch(text); m != nil {
-					a.store.updateTitle(convID, strings.TrimSpace(m[1]))
-					text = strings.TrimSpace(titlePattern.ReplaceAllString(text, ""))
-				}
-
-				if text == "" {
-					continue // tool-only or title-only message
-				}
-
-				data, _ := json.Marshal(map[string]string{"content": text})
-				sseType = "assistant"
-				sseData = string(data)
-
-			case "user":
-				// Tool results come as user events: {"type":"user","message":{"content":[{"type":"tool_result",...}]}}
-				var blocks []any
-				if msg, ok := raw["message"].(map[string]any); ok {
-					blocks, _ = msg["content"].([]any)
-				}
-				for _, b := range blocks {
-					block, ok := b.(map[string]any)
-					if !ok {
-						continue
-					}
-					if bt, _ := block["type"].(string); bt == "tool_result" {
-						toolID, _ := block["tool_use_id"].(string)
-						content, _ := block["content"].(string)
-						data, _ := json.Marshal(map[string]string{"id": toolID, "output": content})
-						msgID, _ := a.store.addMessage(convID, "tool_result", string(data))
-						fmt.Fprintf(w, "id: %d\nevent: tool_result\ndata: %s\n\n", msgID, string(data))
-						flusher.Flush()
-					}
-				}
-				continue
-
-			case "result":
-				// Usage is nested: {"usage":{"input_tokens":N,"output_tokens":N,...}}
-				var inputTok, outputTok, cacheRead, cacheWrite float64
-				if usage, ok := raw["usage"].(map[string]any); ok {
-					inputTok, _ = usage["input_tokens"].(float64)
-					outputTok, _ = usage["output_tokens"].(float64)
-					cacheRead, _ = usage["cache_read_input_tokens"].(float64)
-					cacheWrite, _ = usage["cache_creation_input_tokens"].(float64)
-				}
-				a.store.addUsage(convID, int(inputTok), int(outputTok), int(cacheRead), int(cacheWrite))
-
-				// Extract title from result text (may not appear in assistant events).
-				if resultText, _ := raw["result"].(string); resultText != "" {
-					if m := titlePattern.FindStringSubmatch(resultText); m != nil {
-						a.store.updateTitle(convID, strings.TrimSpace(m[1]))
-					}
-				}
-
-				sseType = "done"
-				sseData = line
-
-			default:
-				continue
-			}
-
-			// Database first, then SSE.
-			msgID, _ := a.store.addMessage(convID, sseType, sseData)
-			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", msgID, sseType, sseData)
-			flusher.Flush()
-		}
-		cmd.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-r.Context().Done():
-		cmd.Process.Kill()
-		cmd.Wait()
-	}
-}
-
-func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, convID string) {
-	// Verify conversation exists and get last user message.
-	conv, err := a.store.getConversation(convID)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	if conv == nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	msgs, err := a.store.getMessages(convID, 0)
-	if err != nil || len(msgs) == 0 {
-		http.Error(w, "no messages", 400)
-		return
-	}
-	// Find last user message.
-	var lastUserMsg string
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Type == "user" {
-			lastUserMsg = msgs[i].Content
-			break
-		}
-	}
-	if lastUserMsg == "" {
-		http.Error(w, "no user message", 400)
-		return
-	}
-
-	// Reject if agent already running for this conversation.
-	a.mu.Lock()
-	if _, running := a.sessions[convID]; running {
-		a.mu.Unlock()
-		http.Error(w, "agent already running", 409)
-		return
-	}
-	session := &agentSession{
-		done: make(chan struct{}),
-	}
-	a.sessions[convID] = session
-	a.mu.Unlock()
-
-	defer func() {
-		a.mu.Lock()
-		delete(a.sessions, convID)
-		a.mu.Unlock()
-		close(session.done)
-	}()
-
-	// Spawn agent process.
+	// Build agent invocation.
 	bin := a.agentBin
 	if bin == "" {
 		bin = "claude"
@@ -408,15 +186,37 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 		"--output-format", "stream-json",
 		"--verbose",
 		"--allowed-tools", strings.Join(tools, ","),
-		"-p", lastUserMsg,
+		"-p", msg.Content,
 		"--system-prompt", a.buildSystemPrompt(),
 	}
 	if conv.SessionID != "" {
 		args = append(args, "--resume", conv.SessionID)
 	}
 
-	// Build extra PATH entries: the slot-machine binary's dir and
-	// ~/.local/bin (common user-local install location for claude).
+	env := a.buildAgentEnv()
+
+	err = a.manager.enqueue(agentWork{
+		convID:    convID,
+		message:   msg.Content,
+		sessionID: conv.SessionID,
+		bin:       bin,
+		args:      args,
+		dir:       a.stagingDir,
+		env:       env,
+	})
+	if err != nil {
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.WriteHeader(200)
+}
+
+func (a *agentService) buildAgentEnv() []string {
+	var env []string
+	if a.envFunc != nil {
+		env = a.envFunc()
+	}
 	var extraDirs []string
 	if self, err := os.Executable(); err == nil {
 		extraDirs = append(extraDirs, filepath.Dir(self))
@@ -424,53 +224,44 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 	if home, err := os.UserHomeDir(); err == nil {
 		extraDirs = append(extraDirs, filepath.Join(home, ".local", "bin"))
 	}
-
-	// exec.Command resolves the binary using the daemon's PATH, which under
-	// systemd won't include ~/.local/bin. Check extra dirs manually.
-	if filepath.Base(bin) == bin {
-		if _, err := exec.LookPath(bin); err != nil {
-			for _, dir := range extraDirs {
-				candidate := filepath.Join(dir, bin)
-				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-					bin = candidate
-					break
-				}
-			}
-		}
-	}
-
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = a.stagingDir
-	if a.envFunc != nil {
-		cmd.Env = a.envFunc()
-	}
-	// Prepend extra dirs to the subprocess PATH too.
 	if len(extraDirs) > 0 {
 		prefix := strings.Join(extraDirs, ":")
-		for i, e := range cmd.Env {
+		for i, e := range env {
 			if strings.HasPrefix(e, "PATH=") {
-				cmd.Env[i] = "PATH=" + prefix + ":" + e[5:]
+				env[i] = "PATH=" + prefix + ":" + e[5:]
 				break
 			}
 		}
 	}
-	session.cmd = cmd
+	env = append(env, "DISABLE_AUTOUPDATER=1")
+	return env
+}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		http.Error(w, "failed to create pipe", 500)
+func (a *agentService) handleCancel(w http.ResponseWriter, r *http.Request, convID string) {
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", 405)
 		return
 	}
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "agent start error: %v (bin=%s)\n", err, bin)
-		http.Error(w, "failed to start agent", 500)
+	if err := a.manager.cancel(convID); err != nil {
+		http.Error(w, err.Error(), 404)
+		return
+	}
+	w.WriteHeader(200)
+}
+
+func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, convID string) {
+	conv, err := a.store.getConversation(convID)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if conv == nil {
+		http.NotFound(w, r)
 		return
 	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		cmd.Process.Kill()
-		cmd.Wait()
 		http.Error(w, "streaming not supported", 500)
 		return
 	}
@@ -481,6 +272,84 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 	w.WriteHeader(200)
 	flusher.Flush()
 
-	// Stream agent output directly to client.
-	a.streamAgentOutput(w, flusher, r, convID, stdout, cmd)
+	// Replay missed events.
+	var afterID int64
+	if lastID := r.Header.Get("Last-Event-ID"); lastID != "" {
+		fmt.Sscanf(lastID, "%d", &afterID)
+	}
+
+	msgs, _ := a.store.getMessages(convID, afterID)
+	for _, m := range msgs {
+		fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", m.ID, m.Type, m.Content)
+		afterID = m.ID
+	}
+	flusher.Flush()
+
+	// Subscribe to live broadcast if agent is running.
+	ra := a.manager.getRunning(convID)
+	if ra == nil {
+		fmt.Fprintf(w, "event: status\ndata: {\"status\":%q}\n\n", conv.Status)
+		flusher.Flush()
+		return
+	}
+
+	// Live subscription loop with ticker-based wakeup.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				ra.cond.Broadcast()
+			case <-ra.done:
+				ra.cond.Broadcast()
+				return
+			}
+		}
+	}()
+
+	ra.mu.Lock()
+	lastSeq := ra.eventSeq
+	ra.mu.Unlock()
+
+	for {
+		if r.Context().Err() != nil {
+			return
+		}
+
+		ra.mu.Lock()
+		for ra.eventSeq == lastSeq && r.Context().Err() == nil {
+			ra.cond.Wait()
+		}
+		lastSeq = ra.eventSeq
+		ra.mu.Unlock()
+
+		if r.Context().Err() != nil {
+			return
+		}
+
+		newMsgs, _ := a.store.getMessages(convID, afterID)
+		for _, msg := range newMsgs {
+			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", msg.ID, msg.Type, msg.Content)
+			afterID = msg.ID
+		}
+		flusher.Flush()
+
+		select {
+		case <-ra.done:
+			finalMsgs, _ := a.store.getMessages(convID, afterID)
+			for _, msg := range finalMsgs {
+				fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", msg.ID, msg.Type, msg.Content)
+			}
+			conv, _ := a.store.getConversation(convID)
+			status := "idle"
+			if conv != nil {
+				status = conv.Status
+			}
+			fmt.Fprintf(w, "event: status\ndata: {\"status\":%q}\n\n", status)
+			flusher.Flush()
+			return
+		default:
+		}
+	}
 }
