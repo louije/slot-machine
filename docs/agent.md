@@ -59,30 +59,37 @@ A session is a Claude Code CLI process managed by slot-machine. The lifecycle:
 
 ```
 1. User sends a message           POST /agent/conversations/:id/messages
-2. slot-machine spawns claude     claude --output-format stream-json
-                                         --resume <session_id>
-                                         --cwd <staging_slot>
-                                         -p "message"
-3. Stream output to browser       GET /agent/conversations/:id/stream (SSE)
-4. Claude runs tools, edits code  (in the staging slot directory)
-5. Process exits                  session_id saved for resume
-6. User sends another message     → step 2, with --resume
+2. slot-machine enqueues work     agentManager spawns claude in background
+3. Agent runs as background       claude --output-format stream-json
+   goroutine                              --resume <session_id>
+                                          --cwd <staging_slot>
+                                          -p "message"
+4. Events stored in SQLite        Each event gets a row ID
+5. Browser connects to SSE        GET /agent/conversations/:id/stream
+6. SSE replays from Last-Event-ID Missed events delivered on reconnect
+7. Claude runs tools, edits code  (in the staging slot directory)
+8. Process exits                  session_id saved for resume
+9. SSE receives status event      {"status":"idle"} or {"status":"error"}
 ```
 
 ### Process management
 
-slot-machine already manages app processes (spawn, health check, drain,
-SIGKILL on timeout). Agent processes use the same primitives:
+The agent runs as a background goroutine in `agentManager`, independent of
+HTTP connections. This means:
 
-- **Spawn**: `exec.Command("claude", ...)` with stdout pipe for stream-json
-  parsing. The process runs in the staging slot's directory with the app's
-  env vars loaded.
-- **Monitor**: if the process hangs (no output for N minutes), kill it. If
-  the process exits unexpectedly, report the error via SSE.
-- **Cancel**: SIGTERM, wait 5 seconds, SIGKILL. The user can cancel from the
-  chat UI.
-- **Concurrency**: one active session at a time (same as deploy locking).
-  A second request while the agent is running gets rejected or queued.
+- **Browser disconnect doesn't kill the agent** — the process keeps running
+  and events are stored in SQLite. When the browser reconnects, missed events
+  are replayed via `Last-Event-ID`.
+- **Status tracking**: conversations have a `status` field: `idle`, `running`,
+  `error`, or `interrupted`. The SSE stream ends with an `event: status`
+  message.
+- **Server restart recovery**: on startup, any conversations left in `running`
+  status are marked `interrupted` with a system message telling the user to
+  send a new message to continue.
+- **Concurrency**: one active agent at a time. A second request while the
+  agent is running gets a `409 Conflict` response (the message is still stored).
+- **Cancel**: `POST /agent/conversations/:id/cancel` sends SIGTERM, waits 5
+  seconds, then SIGKILL.
 
 ### Session resumption
 
@@ -108,6 +115,12 @@ conversations
   id            TEXT PRIMARY KEY
   title         TEXT
   session_id    TEXT          -- Claude session for --resume
+  user          TEXT
+  input_tokens  INTEGER
+  output_tokens INTEGER
+  cache_read    INTEGER
+  cache_write   INTEGER
+  status        TEXT          -- idle, running, error, interrupted
   created_at    DATETIME
   updated_at    DATETIME
 
@@ -160,6 +173,9 @@ data: {"content": "Process exited with code 1"}
 
 event: done
 data: {"conversation_id": "...", "usage": {"input_tokens": 1234, ...}}
+
+event: status
+data: {"status": "idle"}
 ```
 
 The message format is normalized from Claude's stream-json output. The chat

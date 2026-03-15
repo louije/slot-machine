@@ -164,6 +164,38 @@ All fields in `slot-machine.json`:
 | `trusted` | Behind a reverse proxy that handles auth upstream (e.g. Caddy + basic auth). Username passed in header, no verification. |
 | `none` | Local development only. No auth. |
 
+### Authentication (Claude API)
+
+The agent needs an OAuth token from `claude login`. Set it in the app environment:
+
+```sh
+# systemd
+Environment=CLAUDE_CODE_OAUTH_TOKEN=your-token-here
+
+# or in your env_file (.env)
+CLAUDE_CODE_OAUTH_TOKEN=your-token-here
+```
+
+### Agent tools
+
+Default tools: `Bash`, `Edit`, `Read`, `Write`, `Glob`, `Grep`. Add more in
+`slot-machine.json`:
+
+```json
+{
+  "agent_allowed_tools": ["Bash", "Edit", "Read", "Write", "Glob", "Grep", "WebSearch", "WebFetch"]
+}
+```
+
+### Claude binary
+
+slot-machine installs the Claude Code CLI automatically on first start into
+`.slot-machine/.local/bin/claude`. To use your own installation:
+
+```sh
+export SLOT_MACHINE_AGENT_BIN=/path/to/claude
+```
+
 ### Custom styling
 
 A `chat.css` in the project root overrides CSS variables:
@@ -207,7 +239,7 @@ slot-machine injects these into the app process:
 | `POST` | `/agent/conversations` | Create conversation |
 | `GET` | `/agent/conversations/:id` | Conversation with messages |
 | `POST` | `/agent/conversations/:id/messages` | Send message |
-| `GET` | `/agent/conversations/:id/stream` | SSE stream (`system`, `assistant`, `tool_use`, `tool_result`, `done`) |
+| `GET` | `/agent/conversations/:id/stream` | SSE stream (`system`, `assistant`, `tool_use`, `tool_result`, `done`, `status`) |
 | `POST` | `/agent/conversations/:id/cancel` | Kill running agent |
 
 ## Tests

@@ -434,16 +434,36 @@ function connectSSE(convId) {
       } catch(err){}
     }
     finalizeAssistant();
-    setStreaming(false);
-    if (evtSource) { evtSource.close(); evtSource = null; }
-    // Refresh conversation to get updated title.
+    // Don't close here — wait for the status event.
     if (state.convId) loadConversation(state.convId, true);
   });
 
-  evtSource.onerror = function() {
+  evtSource.addEventListener('status', function(e) {
+    try {
+      var d = JSON.parse(e.data);
+      if (d.status === 'idle') {
+        finalizeAssistant();
+        setStreaming(false);
+      } else if (d.status === 'error') {
+        finalizeAssistant();
+        setStreaming(false);
+        $status.textContent = 'Agent encountered an error.';
+      } else if (d.status === 'interrupted') {
+        finalizeAssistant();
+        setStreaming(false);
+        $status.textContent = 'Agent was interrupted (server restarted). Send a new message to continue.';
+      } else if (d.status === 'running') {
+        // Agent is still running; keep streaming.
+        setStreaming(true);
+        return; // don't close — keep receiving events
+      }
+    } catch(err){}
     if (evtSource) { evtSource.close(); evtSource = null; }
-    finalizeAssistant();
-    setStreaming(false);
+  });
+
+  evtSource.onerror = function() {
+    // Don't close — EventSource will auto-reconnect with Last-Event-ID.
+    // The status event will close the connection when the agent finishes.
   };
 }
 
@@ -462,9 +482,12 @@ function setStreaming(on) {
 async function loadConversations() {
   try {
     var convs = await api('GET', '/agent/conversations');
-    renderConvList(convs || []);
+    convs = convs || [];
+    renderConvList(convs);
+    return convs;
   } catch(err) {
     console.error('loadConversations:', err);
+    return [];
   }
 }
 
@@ -512,6 +535,11 @@ async function loadConversation(id, silent) {
     } else if (conv.title) {
       $title.textContent = conv.title;
     }
+    // Auto-connect SSE if agent is running (only on full load, not silent refresh).
+    if (!silent && conv.status === 'running') {
+      setStreaming(true);
+      connectSSE(id);
+    }
   } catch(err) {
     console.error('loadConversation:', err);
   }
@@ -554,6 +582,8 @@ function renderStoredMessages(msgs) {
 
 function switchConversation(id) {
   closePanel($convOverlay);
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  setStreaming(false);
   loadConversation(id);
 }
 
@@ -579,7 +609,19 @@ async function sendMessage() {
   setStreaming(true);
 
   try {
-    await api('POST', '/agent/conversations/'+state.convId+'/messages', {content: text});
+    var resp = await fetch('/agent/conversations/'+state.convId+'/messages', {
+      method: 'POST',
+      headers: Object.assign({'Content-Type': 'application/json'}, state.authHeader ? {'X-SlotMachine-User': state.authHeader} : {}),
+      body: JSON.stringify({content: text})
+    });
+    if (resp.status === 409) {
+      $status.textContent = 'Agent is busy. Message saved.';
+      setStreaming(false);
+      return;
+    }
+    if (!resp.ok) {
+      throw new Error('HTTP ' + resp.status);
+    }
     connectSSE(state.convId);
   } catch(err) {
     appendMessage('system', '<span style="color:var(--sm-error)">Error: '+escHtml(err.message)+'</span>');
@@ -687,9 +729,13 @@ loadSettings();
 
   await setupAuth();
 
-  await loadConversations();
+  var convs = await loadConversations(); // sorted by renderConvList
   var items = $convList.querySelectorAll('.sm-conv-item');
-  if (items.length > 0) {
+  // Don't auto-open stale conversations (>30min) — show empty state instead.
+  var staleMs = 33 * 60 * 1000;
+  var latest = convs[0];
+  var isStale = !latest || (Date.now() - new Date(latest.updated_at || latest.created_at).getTime() > staleMs);
+  if (items.length > 0 && !isStale) {
     switchConversation(items[0].dataset.convId);
   } else {
     showEmpty();
