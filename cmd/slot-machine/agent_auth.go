@@ -63,12 +63,14 @@ slot-machine deploy deploys the HEAD of this worktree. The old version keeps ser
 
 Commit freely — atomic, descriptive messages. Deploy when you believe the task is done.
 
-## Git notes
+## Git workflow
 
-- You are on a detached HEAD. Commits work fine.
-- To also push to a remote branch:
-  git checkout -b <branch-name>
-  git push -u origin <branch-name>
+After a successful deploy, push your work to the machine branch:
+
+  git push origin HEAD:machine
+
+If there is no remote configured or the push fails, report the error but
+don't let it block you — the deploy already succeeded.
 
 ## What you should NOT do
 
