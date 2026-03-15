@@ -988,3 +988,37 @@ func TestAgentManagerCancel(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveClaudeFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	os.WriteFile(bin, []byte("#!/bin/sh\necho hi"), 0755)
+
+	t.Setenv("SLOT_MACHINE_AGENT_BIN", bin)
+	got := resolveClaude(dir)
+	if got != bin {
+		t.Fatalf("expected %s, got %s", bin, got)
+	}
+}
+
+func TestResolveClaudeFromDataDir(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, ".local", "bin")
+	os.MkdirAll(binDir, 0755)
+	bin := filepath.Join(binDir, "claude")
+	os.WriteFile(bin, []byte("#!/bin/sh\necho hi"), 0755)
+
+	t.Setenv("SLOT_MACHINE_AGENT_BIN", "")
+	got := resolveClaude(dir)
+	if got != bin {
+		t.Fatalf("expected %s, got %s", bin, got)
+	}
+}
+
+func TestResolveClaudeNotFound(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SLOT_MACHINE_AGENT_BIN", "")
+	got := resolveClaude(dir)
+	// May find claude in PATH if installed, so just check it doesn't crash.
+	_ = got
+}

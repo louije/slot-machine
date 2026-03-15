@@ -170,10 +170,23 @@ func cmdStart(args []string) {
 		fmt.Printf("recovered %d interrupted agent sessions\n", n)
 	}
 
+	agentBin := resolveClaude(*dataDir)
+	if agentBin == "" {
+		var installErr error
+		agentBin, installErr = installClaude(*dataDir)
+		if installErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", installErr)
+			fmt.Fprintln(os.Stderr, "set SLOT_MACHINE_AGENT_BIN to the claude binary path")
+		}
+	}
+	if agentBin != "" {
+		fmt.Printf("agent binary: %s\n", agentBin)
+	}
+
 	agent := &agentService{
 		store:        store,
 		manager:      mgr,
-		agentBin:     os.Getenv("SLOT_MACHINE_AGENT_BIN"),
+		agentBin:     agentBin,
 		stagingDir:   filepath.Join(*dataDir, "slot-staging"),
 		configPath:   *configPath,
 		dataDir:      *dataDir,
