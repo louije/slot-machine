@@ -196,6 +196,25 @@ slot-machine installs the Claude Code CLI automatically on first start into
 export SLOT_MACHINE_AGENT_BIN=/path/to/claude
 ```
 
+### Deploy key (git push from agent)
+
+To let the agent push to a remote branch, add a deploy key:
+
+1. Generate a key: `ssh-keygen -t ed25519 -C "deploy" -f deploy-key -N ""`
+2. Add the public key to GitHub (repo → Settings → Deploy keys, enable write access)
+3. Put the private key on the server at `~/.ssh/<name>` with `chmod 600`
+4. Configure `~/.ssh/config`:
+   ```
+   Host github.com
+     IdentityFile ~/.ssh/<name>
+     IdentitiesOnly yes
+   ```
+5. Add the remote to the bare repo: `git remote add origin git@github.com:user/repo.git`
+
+The agent's file tools are scoped to the staging directory and cannot access
+`~/.ssh/`. Deny rules also block `Read`, `Bash(cat ...)`, and similar commands
+on `~/.ssh/*`.
+
 ### Custom styling
 
 A `chat.css` in the project root overrides CSS variables:

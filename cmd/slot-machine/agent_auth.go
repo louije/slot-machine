@@ -112,14 +112,32 @@ func (a *agentService) generateDenySettings() error {
 	absConfig, _ := filepath.Abs(a.configPath)
 	absBin := filepath.Join(a.dataDir, ".local", "bin")
 
+	deny := []string{
+		"Edit(" + absConfig + ")",
+		"Write(" + absConfig + ")",
+		"Edit(" + absBin + "/*)",
+		"Write(" + absBin + "/*)",
+	}
+
+	// Protect SSH keys from agent access.
+	if home, err := os.UserHomeDir(); err == nil {
+		sshDir := filepath.Join(home, ".ssh")
+		deny = append(deny,
+			"Read("+sshDir+"/*)",
+			"Edit("+sshDir+"/*)",
+			"Write("+sshDir+"/*)",
+			"Bash(cat "+sshDir+"/*)",
+			"Bash(head "+sshDir+"/*)",
+			"Bash(tail "+sshDir+"/*)",
+			"Bash(less "+sshDir+"/*)",
+			"Bash(more "+sshDir+"/*)",
+			"Bash(cp "+sshDir+"/*)",
+		)
+	}
+
 	settings := map[string]any{
 		"permissions": map[string]any{
-			"deny": []string{
-				"Edit(" + absConfig + ")",
-				"Write(" + absConfig + ")",
-				"Edit(" + absBin + "/*)",
-				"Write(" + absBin + "/*)",
-			},
+			"deny": deny,
 		},
 	}
 
