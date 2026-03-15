@@ -272,10 +272,13 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 	w.WriteHeader(200)
 	flusher.Flush()
 
-	// Replay missed events.
+	// Replay missed events. Accept Last-Event-ID header (auto-reconnect)
+	// or ?after= query param (initial connect with known offset).
 	var afterID int64
 	if lastID := r.Header.Get("Last-Event-ID"); lastID != "" {
 		fmt.Sscanf(lastID, "%d", &afterID)
+	} else if after := r.URL.Query().Get("after"); after != "" {
+		fmt.Sscanf(after, "%d", &afterID)
 	}
 
 	msgs, _ := a.store.getMessages(convID, afterID)

@@ -182,6 +182,7 @@ var state = {
   convId: null,
   streaming: false,
   pendingTools: {},
+  lastEventId: 0,
   authHeader: '',
   settings: { theme:'auto', toolVis:'collapsed', sysVis:'hide', fontSize:'15' }
 };
@@ -385,9 +386,14 @@ var evtSource = null;
 
 function connectSSE(convId) {
   if (evtSource) { evtSource.close(); evtSource = null; }
-  evtSource = new EventSource('/agent/conversations/'+convId+'/stream');
+  var url = '/agent/conversations/'+convId+'/stream';
+  if (state.lastEventId) url += '?after=' + state.lastEventId;
+  evtSource = new EventSource(url);
+
+  function trackId(e) { if (e.lastEventId) state.lastEventId = parseInt(e.lastEventId, 10) || state.lastEventId; }
 
   evtSource.addEventListener('assistant', function(e) {
+    trackId(e);
     try {
       var d = JSON.parse(e.data);
       appendAssistantChunk(d.content || '');
@@ -395,6 +401,7 @@ function connectSSE(convId) {
   });
 
   evtSource.addEventListener('tool_use', function(e) {
+    trackId(e);
     try {
       var d = JSON.parse(e.data);
       finalizeAssistant();
@@ -406,6 +413,7 @@ function connectSSE(convId) {
   });
 
   evtSource.addEventListener('tool_result', function(e) {
+    trackId(e);
     try {
       var d = JSON.parse(e.data);
       fillToolResult(d.id, d.output);
@@ -414,6 +422,7 @@ function connectSSE(convId) {
   });
 
   evtSource.addEventListener('system', function(e) {
+    trackId(e);
     // System events (init, etc.) — optionally shown.
     if (state.settings.sysVis === 'show') {
       try {
@@ -426,6 +435,7 @@ function connectSSE(convId) {
   });
 
   evtSource.addEventListener('done', function(e) {
+    trackId(e);
     // If no assistant chunks were streamed, extract result text from done event.
     if (!currentAssistantEl) {
       try {
@@ -546,6 +556,8 @@ async function loadConversation(id, silent) {
 }
 
 function renderStoredMessages(msgs) {
+  // Track highest message ID so SSE only replays newer events.
+  msgs.forEach(function(m) { if (m.id > state.lastEventId) state.lastEventId = m.id; });
   var hasAssistant = msgs.some(function(m) { return m.type === 'assistant'; });
   msgs.forEach(function(m) {
     if (m.type === 'user') {
@@ -584,6 +596,7 @@ function switchConversation(id) {
   closePanel($convOverlay);
   if (evtSource) { evtSource.close(); evtSource = null; }
   setStreaming(false);
+  state.lastEventId = 0;
   loadConversation(id);
 }
 
