@@ -906,3 +906,110 @@ func findSubstring(s, sub string) bool {
 	}
 	return false
 }
+
+func TestAgentManagerStartStop(t *testing.T) {
+	t.Parallel()
+	s, _ := openAgentStore(filepath.Join(t.TempDir(), "test.db"))
+	defer s.close()
+
+	mgr := newAgentManager(s)
+	mgr.stop()
+}
+
+func TestAgentManagerRunAgent(t *testing.T) {
+	t.Parallel()
+	s, _ := openAgentStore(filepath.Join(t.TempDir(), "test.db"))
+	defer s.close()
+	s.createConversation("c1", "user1")
+
+	mgr := newAgentManager(s)
+	defer mgr.stop()
+
+	// Use "echo" as a mock agent — outputs nothing useful but exits 0.
+	err := mgr.enqueue(agentWork{
+		convID:  "c1",
+		message: "hello",
+		bin:     "echo",
+		args:    []string{"hello"},
+		dir:     t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for agent to finish.
+	deadline := time.After(5 * time.Second)
+	for {
+		c, _ := s.getConversation("c1")
+		if c.Status == "idle" || c.Status == "error" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("agent did not finish in time")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func TestAgentManagerRejectsConcurrent(t *testing.T) {
+	t.Parallel()
+	s, _ := openAgentStore(filepath.Join(t.TempDir(), "test.db"))
+	defer s.close()
+	s.createConversation("c1", "user1")
+
+	mgr := newAgentManager(s)
+	defer mgr.stop()
+
+	// "sleep 10" as a long-running mock agent.
+	err := mgr.enqueue(agentWork{
+		convID: "c1", bin: "sleep", args: []string{"10"}, dir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second enqueue for same conversation should fail.
+	err = mgr.enqueue(agentWork{
+		convID: "c1", bin: "echo", args: []string{"hi"}, dir: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected error for concurrent agent, got nil")
+	}
+}
+
+func TestAgentManagerCancel(t *testing.T) {
+	t.Parallel()
+	s, _ := openAgentStore(filepath.Join(t.TempDir(), "test.db"))
+	defer s.close()
+	s.createConversation("c1", "user1")
+
+	mgr := newAgentManager(s)
+	defer mgr.stop()
+
+	mgr.enqueue(agentWork{
+		convID: "c1", bin: "sleep", args: []string{"60"}, dir: t.TempDir(),
+	})
+
+	// Give the agent a moment to start.
+	time.Sleep(100 * time.Millisecond)
+
+	err := mgr.cancel("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for status to settle.
+	deadline := time.After(5 * time.Second)
+	for {
+		c, _ := s.getConversation("c1")
+		if c.Status != "running" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("cancel did not finish in time")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
