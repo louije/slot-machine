@@ -23,6 +23,7 @@ type conversationRow struct {
 	CacheWrite   int    `json:"cache_write"`
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`
+	Status       string `json:"status"`
 }
 
 type messageRow struct {
@@ -66,6 +67,9 @@ func openAgentStore(path string) (*agentStore, error) {
 		return nil, fmt.Errorf("schema init: %w", err)
 	}
 
+	// Migration: add status column if missing (idempotent).
+	db.Exec(`ALTER TABLE conversations ADD COLUMN status TEXT NOT NULL DEFAULT 'idle'`)
+
 	return &agentStore{db: db}, nil
 }
 
@@ -80,18 +84,18 @@ func (s *agentStore) createConversation(id, user string) (*conversationRow, erro
 	if err != nil {
 		return nil, err
 	}
-	return &conversationRow{ID: id, User: user, CreatedAt: now, UpdatedAt: now}, nil
+	return &conversationRow{ID: id, User: user, CreatedAt: now, UpdatedAt: now, Status: "idle"}, nil
 }
 
 func (s *agentStore) getConversation(id string) (*conversationRow, error) {
 	row := s.db.QueryRow(
-		`SELECT id, title, session_id, user, input_tokens, output_tokens, cache_read, cache_write, created_at, updated_at
+		`SELECT id, title, session_id, user, input_tokens, output_tokens, cache_read, cache_write, created_at, updated_at, status
 		 FROM conversations WHERE id = ?`, id,
 	)
 	var c conversationRow
 	err := row.Scan(&c.ID, &c.Title, &c.SessionID, &c.User,
 		&c.InputTokens, &c.OutputTokens, &c.CacheRead, &c.CacheWrite,
-		&c.CreatedAt, &c.UpdatedAt)
+		&c.CreatedAt, &c.UpdatedAt, &c.Status)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -100,7 +104,7 @@ func (s *agentStore) getConversation(id string) (*conversationRow, error) {
 
 func (s *agentStore) listConversations() ([]conversationRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, title, session_id, user, input_tokens, output_tokens, cache_read, cache_write, created_at, updated_at
+		`SELECT id, title, session_id, user, input_tokens, output_tokens, cache_read, cache_write, created_at, updated_at, status
 		 FROM conversations ORDER BY updated_at DESC`,
 	)
 	if err != nil {
@@ -113,7 +117,7 @@ func (s *agentStore) listConversations() ([]conversationRow, error) {
 		var c conversationRow
 		if err := rows.Scan(&c.ID, &c.Title, &c.SessionID, &c.User,
 			&c.InputTokens, &c.OutputTokens, &c.CacheRead, &c.CacheWrite,
-			&c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.CreatedAt, &c.UpdatedAt, &c.Status); err != nil {
 			return nil, err
 		}
 		list = append(list, c)
@@ -177,4 +181,36 @@ func (s *agentStore) addUsage(id string, input, output, cacheRead, cacheWrite in
 		input, output, cacheRead, cacheWrite, id,
 	)
 	return err
+}
+
+func (s *agentStore) setConversationStatus(id, status string) error {
+	_, err := s.db.Exec(
+		`UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?`,
+		status, time.Now().Format(time.RFC3339), id,
+	)
+	return err
+}
+
+func (s *agentStore) recoverInterrupted() (int, error) {
+	rows, err := s.db.Query(
+		`SELECT id FROM conversations WHERE status = 'running'`,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+
+	for _, id := range ids {
+		s.setConversationStatus(id, "interrupted")
+		s.addMessage(id, "system",
+			`{"content":"Agent session interrupted (server restarted). Send a new message to continue the conversation."}`)
+	}
+	return len(ids), nil
 }

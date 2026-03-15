@@ -820,6 +820,79 @@ func TestApplySharedDirs(t *testing.T) {
 	})
 }
 
+func TestStoreStatusMigration(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s1, err := openAgentStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1.close()
+
+	s2, err := openAgentStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.close()
+
+	conv, _ := s2.createConversation("c1", "user1")
+	if conv.Status != "idle" {
+		t.Fatalf("expected status 'idle', got %q", conv.Status)
+	}
+}
+
+func TestSetConversationStatus(t *testing.T) {
+	t.Parallel()
+	s, _ := openAgentStore(filepath.Join(t.TempDir(), "test.db"))
+	defer s.close()
+
+	s.createConversation("c1", "user1")
+
+	if err := s.setConversationStatus("c1", "running"); err != nil {
+		t.Fatal(err)
+	}
+	conv, _ := s.getConversation("c1")
+	if conv.Status != "running" {
+		t.Fatalf("expected 'running', got %q", conv.Status)
+	}
+}
+
+func TestRecoverInterrupted(t *testing.T) {
+	t.Parallel()
+	s, _ := openAgentStore(filepath.Join(t.TempDir(), "test.db"))
+	defer s.close()
+
+	s.createConversation("c1", "u")
+	s.setConversationStatus("c1", "running")
+	s.createConversation("c2", "u")
+	s.setConversationStatus("c2", "running")
+	s.createConversation("c3", "u") // idle, should not be touched
+
+	n, err := s.recoverInterrupted()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 recovered, got %d", n)
+	}
+
+	c1, _ := s.getConversation("c1")
+	if c1.Status != "interrupted" {
+		t.Fatalf("expected 'interrupted', got %q", c1.Status)
+	}
+
+	msgs, _ := s.getMessages("c1", 0)
+	found := false
+	for _, m := range msgs {
+		if m.Type == "system" && strings.Contains(m.Content, "interrupted") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected system message about interruption")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
 		findSubstring(s, substr))
