@@ -1,0 +1,17 @@
+#!/bin/sh
+# Conformance adapter for the Go implementation.
+#
+# The adapter contract is four flags — --config, --repo, --data, --port — and
+# "run in the foreground until signalled". Translating that into whatever CLI an
+# implementation happens to have is the adapter's whole job, which is why the
+# conformance suite does not need to know about any of it.
+set -eu
+
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/../../.." && pwd)"
+bin="${SLOT_MACHINE_BIN:-$root/slot-machine}"
+
+if [ ! -x "$bin" ]; then
+  ( cd "$root" && go build -o "$bin" ./cmd/slot-machine/ )
+fi
+
+exec "$bin" start "$@"

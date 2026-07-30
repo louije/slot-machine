@@ -423,6 +423,36 @@ slot-machine injects these into the app process:
 | `GET` | `/agent/conversations/:id/stream` | SSE stream (`system`, `assistant`, `tool_use`, `tool_result`, `done`, `status`) |
 | `POST` | `/agent/conversations/:id/cancel` | Kill running agent |
 
+## The spec, and a second implementation
+
+`docs/orchestrator-spec.md` is a normative spec: 31 numbered requirements,
+written so that an orchestrator can be implemented from the document alone.
+
+It is kept honest by a second implementation. `impl/ruby` is about 500 lines of
+Ruby that implements the spec and nothing else — no agent, no chat, no deploy
+gate, no machine branch. It exists to be different: it materialises slots with
+`git archive` instead of git worktrees, so a slot has no `.git` in it at all, and
+names them by generation rather than by commit. Both implementations pass the
+same suite.
+
+```sh
+ruby spec/conformance/coverage_test.rb    # every requirement has a test
+ORCHESTRATOR_ADAPTER=spec/conformance/adapters/go   ruby spec/conformance/conformance_test.rb
+ORCHESTRATOR_ADAPTER=spec/conformance/adapters/ruby ruby spec/conformance/conformance_test.rb
+```
+
+The suite is in Ruby deliberately, not in Go. A conformance suite that shares a
+language and a directory with implementation 1 drifts toward it, and this one has
+to belong to neither. It talks only to the documented endpoints — no slot
+directory names, no symlinks, no process inspection — and where the spec permits
+a choice it accepts every permitted answer.
+
+Writing the second implementation is what turned the document into a spec. Eleven
+things had to be decided that the old version never mentioned, including how an
+app learns which port to bind, whether the API has a readiness endpoint, and
+whether a crashed app should refuse connections or answer 503. All of them are
+now requirements with tests.
+
 ## Code layout
 
 ```

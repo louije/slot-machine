@@ -33,3 +33,30 @@ jobs:
       # failure.
       - name: Test
         run: go test -p 1 ./...
+
+  # The conformance suite is the spec's teeth. It runs against every
+  # implementation, so neither one can quietly become the definition of the spec.
+  conformance:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        implementation: [go, ruby]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      # Fails if a requirement in the spec has no test, or a test cites a
+      # requirement the spec no longer declares. Needs no orchestrator.
+      - name: Spec coverage
+        run: ruby spec/conformance/coverage_test.rb
+
+      - name: Conformance (${{ matrix.implementation }})
+        run: ruby spec/conformance/conformance_test.rb
+        env:
+          ORCHESTRATOR_ADAPTER: spec/conformance/adapters/${{ matrix.implementation }}
