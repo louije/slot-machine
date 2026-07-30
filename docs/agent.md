@@ -60,10 +60,11 @@ A session is a Claude Code CLI process managed by slot-machine. The lifecycle:
 ```
 1. User sends a message           POST /agent/conversations/:id/messages
 2. slot-machine enqueues work     agentManager spawns claude in background
-3. Agent runs as background       claude --output-format stream-json
-   goroutine                              --resume <session_id>
-                                          --cwd <staging_slot>
-                                          -p "message"
+3. Agent runs as background       claude --output-format stream-json --verbose
+   goroutine                              --model <model>
+                                          --append-system-prompt <context>
+                                          --resume <session_id>   (verified on disk)
+                                          -p -- "message"
 4. Events stored in SQLite        Each event gets a row ID
 5. Browser connects to SSE        GET /agent/conversations/:id/stream
 6. SSE replays from Last-Event-ID Missed events delivered on reconnect
@@ -83,11 +84,18 @@ HTTP connections. This means:
 - **Status tracking**: conversations have a `status` field: `idle`, `running`,
   `error`, or `interrupted`. The SSE stream ends with an `event: status`
   message.
-- **Server restart recovery**: on startup, any conversations left in `running`
-  status are marked `interrupted` with a system message telling the user to
-  send a new message to continue.
-- **Concurrency**: one active agent at a time. A second request while the
-  agent is running gets a `409 Conflict` response (the message is still stored).
+- **Server restart recovery**: on startup, any conversation left in `running`
+  is reconciled against reality. The row stores the agent's pid, so a process
+  that outlived the previous daemon is signalled rather than merely relabelled
+  — otherwise it would still be holding the machine slot, still able to commit
+  and deploy, invisible to the new daemon.
+- **Concurrency**: one active agent at a time, globally — every conversation
+  shares one worktree, so two concurrent agents would edit the same files. A
+  message for a *different* conversation queues and is drained in arrival
+  order; the SSE stream stays open through the wait. A second message for the
+  conversation that is already queued or running is a `409 Conflict`.
+- **Timeout**: a turn that exceeds `agent_timeout_s` gets SIGTERM, then SIGKILL
+  five seconds later, and says so in the conversation.
 - **Cancel**: `POST /agent/conversations/:id/cancel` sends SIGTERM, waits 5
   seconds, then SIGKILL.
 
@@ -101,9 +109,10 @@ When the user sends a follow-up message, the CLI resumes with the previous
 session — no need to replay history, and the agent retains its internal
 context (files read, plans made, tool results).
 
-If resume fails (corrupted session, tool_use ID conflict), the fallback is
-automatic: retry without `--resume`, including conversation history in the
-prompt instead.
+The transcript is checked on disk before `--resume` is passed. A stale session
+id fails opaquely inside the CLI and bricks the rest of the conversation, so a
+missing transcript means a fresh session and a note in the chat saying earlier
+context is gone.
 
 ## Conversations
 
@@ -239,26 +248,31 @@ children. The Claude CLI process keeps running.
 The full sequence when the agent deploys:
 
 ```
-1. Agent edits code in staging slot
-2. Agent commits to machine branch
-3. Agent calls POST /deploy (function call within slot-machine)
-4. slot-machine promotes staging → live
+1. Agent edits code in the machine slot
+2. Agent commits to the machine branch
+3. Agent runs `slot-machine deploy`
+4. slot-machine checks that commit out into the staging slot, gates it,
+   sets up, verifies, boots and probes it
+5. slot-machine promotes staging → live
    - Old live → prev (drained, stopped)
    - Proxy switches to new slot's port
    - New staging created (CoW clone)
-5. Chat UI stays connected (SSE is on the proxy, which didn't restart)
-6. Agent reports "Deployed" via SSE
-7. Agent continues working in the new staging slot if needed
+6. Chat UI stays connected (SSE is on the proxy, which didn't restart)
+7. Agent reports "Deployed" via SSE and keeps working — its own worktree
+   was never touched
 ```
 
 Step 5 is the key: the SSE connection is between the browser and
 slot-machine's proxy. The proxy didn't restart. The agent process didn't
 restart. Only the app process swapped. The chat session is uninterrupted.
 
-If the agent wants to keep working after deploy (next task, follow-up edit),
-it operates in the new staging slot. The `--resume` session preserves
-Claude's memory, but the filesystem context has shifted to the fresh clone.
-The agent's CLAUDE.md should note this.
+Step 7 used to be the sharp edge. When the agent worked in the slot that gets
+promoted, `os.Rename` moved that directory to its new name and the running
+process's working directory followed the inode — so after deploying, the agent
+was sitting in the **live** slot, and its next edit changed production in place
+with no health check. Giving the agent its own worktree removes the problem
+rather than documenting around it: nothing renames the machine slot, so the
+agent's filesystem context never shifts.
 
 ## Agent privileges
 
@@ -273,7 +287,13 @@ files, or system paths through these tools.
 
 ### Bash — allowlisted commands
 
-The agent needs to *run things*, not just edit files. The default allowlist:
+> **Status.** Not implemented. The shipped default grants `Bash` unrestricted;
+> the allowlist below is a design target. The deny rules slot-machine does write
+> cover `Read`/`Edit`/`Write` on the config and on `~/.ssh`, which the file
+> tools honour — but they do not constrain a shell. Treat the agent as having
+> full shell access as the daemon's user, because it does.
+
+The agent needs to *run things*, not just edit files. The intended allowlist:
 
 ```
 Bash(git:*)              # commit, branch, merge, pull
@@ -447,9 +467,13 @@ Optional agent-specific fields (with sensible defaults):
 
 | Field | Default | What it does |
 |-------|---------|-------------|
-| `agent_prompt` | `"CLAUDE.md"` | System prompt file, relative to repo root |
-| `agent_timeout_s` | `600` | Max seconds before a stuck session is killed |
-| `agent_allowed_tools` | (see above) | Bash command allowlist; `null` = all tools |
+| `agent_timeout_s` | `1800` | Max seconds before a stuck turn is killed |
+| `agent_model` | CLI default | `claude --model`; unset inherits the server user's settings |
+| `agent_allowed_tools` | Bash, Edit, Read, Write, Glob, Grep | Claude tools the agent may use |
+
+Instruction files are discovered rather than configured: the first of
+`AGENTS.slot-machine.md`, `AGENTS.md`, `CLAUDE.md` found in the machine slot is
+appended to the system prompt.
 
 If these fields aren't in the config, the agent works anyway. Zero-config by
 default, tunable when needed.
@@ -478,3 +502,10 @@ The proxy intercept can optionally require authentication on `/chat` and
 
 For v1, option 1. The system is designed for a single operator on a private
 network.
+
+> The `hmac` mode that currently ships is **not** option 2. `/chat/config` is
+> unauthenticated and returns the secret, because the browser needs it to sign
+> — so anyone who can reach the port can mint a valid header. It labels a user;
+> it does not authenticate one. Put slot-machine behind something that actually
+> authenticates (Caddy `forward_auth`, Tailscale), and read `agent_auth` as a
+> choice of *which* header carries the already-authenticated identity.

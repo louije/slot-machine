@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -335,11 +334,13 @@ func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *running
 	// stderr must be drained, not discarded: it is where the CLI explains auth
 	// failures, spend caps and bad flags. Previously it went to /dev/null, which
 	// is why every failure surfaced as a bare exit code.
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		m.failRun(work.convID, fmt.Sprintf("Could not start the agent: %v", err))
-		return
-	}
+	//
+	// A writer rather than StderrPipe: Wait closes a pipe as soon as the child
+	// exits, so a reader goroutine racing Wait can lose the tail — which is
+	// exactly the part worth keeping. Handing exec an io.Writer makes it own the
+	// copy, and Wait does not return until that copy is done.
+	stderr := &tailWriter{max: stderrTailBytes}
+	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
 		m.failRun(work.convID, fmt.Sprintf("Could not start the agent: %v", err))
@@ -352,9 +353,6 @@ func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *running
 	}
 	m.broadcast()
 
-	stderrCh := make(chan string, 1)
-	go func() { stderrCh <- readTail(stderrPipe, stderrTailBytes) }()
-
 	var lastText string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -365,7 +363,7 @@ func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *running
 	}
 
 	waitErr := cmd.Wait()
-	stderrTail := <-stderrCh
+	stderrTail := stderr.String()
 
 	if err := m.store.setConversationPID(work.convID, 0); err != nil {
 		logf("store: clearing pid for %s: %v", work.convID, err)
@@ -450,25 +448,29 @@ func (m *agentManager) setStatus(convID, status string) {
 	}
 }
 
-// readTail drains r completely, keeping only the last max bytes. Draining is
-// mandatory, not optional: an unread pipe blocks the child once the buffer
-// fills.
-func readTail(r io.Reader, max int) string {
-	var tail []byte
-	buf := make([]byte, 4096)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			tail = append(tail, buf[:n]...)
-			if len(tail) > max {
-				tail = tail[len(tail)-max:]
-			}
-		}
-		if err != nil {
-			break
-		}
+// tailWriter accepts everything written to it but retains only the last max
+// bytes. Accepting everything is the point: a writer that blocked or errored
+// would stall the child once its stderr buffer filled.
+type tailWriter struct {
+	mu  sync.Mutex
+	buf []byte
+	max int
+}
+
+func (t *tailWriter) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
 	}
-	return strings.TrimSpace(string(tail))
+	return len(p), nil
+}
+
+func (t *tailWriter) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.buf))
 }
 
 func jsonContent(s string) string {

@@ -1,0 +1,34 @@
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # The spec suite starts real daemons, apps and agents and binds real
+      # ports. -p 1 keeps packages sequential; -parallel 2 keeps the process
+      # count inside the spec package low enough that health-check timeouts
+      # measure the code rather than the runner's load.
+      - name: Test
+        run: go test -p 1 -parallel 2 ./...

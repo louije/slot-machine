@@ -49,7 +49,9 @@ On promotion, staging is renamed to its commit hash, the old live becomes prev, 
 
 ### Coding Agent
 
-The agent is a Claude Code session managed by slot-machine itself — see [Agent & Chat](agent.md). It works in the staging slot, commits to the `machine` branch, and triggers deploys through an internal call. It is responsible for pulling and merging the human branch before starting work. It has no direct access to process management or the proxy — deploys go through the same promotion pipeline as any other deploy.
+The agent is a Claude Code session managed by slot-machine itself — see [Agent & Chat](agent.md). It works in the **machine slot**, its own worktree checked out on the `machine` branch, and triggers deploys by running the same CLI a human would. It is responsible for pulling and merging the human branch before starting work. It has no direct access to process management or the proxy — deploys go through the same promotion pipeline as any other deploy.
+
+The machine slot is separate from the staging slot on purpose. Earlier drafts had the agent working in the slot that gets promoted, which meant a promotion renamed the directory out from under the running agent — its working directory followed the rename into the *live* slot, so anything it edited next changed production in place. Keeping the two apart also lets a deploy run while the agent is mid-task, and gives the agent's commits a real branch ref instead of a detached HEAD that `git gc` could collect.
 
 The agent process is a child of slot-machine, not the app. This means it survives app deploys: when slot-machine swaps traffic to a new slot and drains the old app process, the agent keeps running. The chat UI's SSE connection goes through the reverse proxy, which also stays up during deploys.
 
@@ -85,6 +87,7 @@ Humans and machines write to separate branches. This eliminates merge conflicts 
 - `main` is the human branch. Humans push here. CI runs here.
 - `machine` is the agent's branch. The agent commits and pushes here.
 - The agent is responsible for merging `main` into `machine` before starting work. If the merge conflicts, the agent resolves it — an LLM-based agent is well-suited to this since it understands the codebase contextually.
+- The orchestrator does not merge. It *detects*: `GET /status` reports how far `machine` has drifted from the human branch, and the deploy gate refuses one specific case — promoting a commit whose tree is missing files the human branch has. That is the only divergence failure with no visible symptom, so it is the only one worth blocking. Ordinary drift is reported and allowed, because the agent has to be able to deploy while it catches up.
 - Humans accept agent changes by merging `machine` into `main` through a pull request, with optional review.
 - Either branch can be deployed. The orchestrator tracks which commit is live regardless of branch.
 
@@ -102,7 +105,11 @@ GitHub webhooks are not guaranteed delivery. A reconciliation loop in the orches
 
 ### Git hygiene
 
-An active agent can produce hundreds of commits per day. When the agent's branch is merged into `main`, squash it. Post-merge, the orchestrator resets `machine` to `main`'s HEAD, giving the agent a clean starting point. The orchestrator runs `git gc` periodically on the local repo.
+An active agent can produce hundreds of commits per day. When the agent's branch is merged into `main`, squash it.
+
+Post-merge, resetting `machine` to `main`'s HEAD gives the agent a clean starting point — but the orchestrator does not do this, and should not. The machine slot is a live worktree that may hold uncommitted agent work, so a daemon-initiated `git reset --hard` would be destroying state it cannot see, which is the failure class the machine/staging split exists to eliminate. Leave it to a human or to the agent itself.
+
+The orchestrator runs `git gc` periodically on the local repo.
 
 ## 5. Continuous Validation
 
@@ -231,6 +238,9 @@ Containers are not part of the v1 architecture, but the orchestrator pattern sta
 | **Secret exposure** — agent accidentally commits credentials | High | Secrets injected by orchestrator from external store. Pre-commit gate scans diffs for secret patterns. Agent has no direct access to secret store. |
 | **Agent calls internal endpoints** — agent-written code triggers migrations or corrupts health checks | High | Internal endpoints on localhost-only port. Optional Unix domain socket with restricted permissions. |
 | **Agent killed mid-task by deploy swap** | Resolved | Agent is a child of slot-machine, not the app. Survives app deploys. See [agent.md](agent.md). |
+| **Agent's working directory moved by a promotion** | Resolved | The agent works in the machine slot; only the staging slot is renamed on promotion. |
+| **Agent's commits unreachable** | Resolved | The machine slot is on a real branch, so commits have a ref and survive `git gc`. |
+| **Two agents in one worktree** | Resolved | One agent slot globally; further turns queue and drain in arrival order. |
 | **Stateful drift** — in-memory sessions, caches, websocket connections lost on swap | Medium | App constraint: externalize all state. Connection draining before stopping old instance. |
 | **Cascading failed deploys** — flawed health check causes valid deploys to fail repeatedly | Medium | Orchestrator tracks consecutive failures and alerts after a threshold. Manual override available. |
 | **Disk pressure** — deploy directories and git history accumulate | Medium | Only current and previous slots kept. Stale slots cleaned up. Git gc runs periodically. Agent commits squashed on merge. |

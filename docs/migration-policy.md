@@ -1,5 +1,12 @@
 # Migration Policy
 
+> **Status.** The orchestrator half is implemented: set `schema_status_endpoint`
+> in `slot-machine.json` and slot-machine reads it after the health check, on
+> deploys and on rollbacks, refusing to promote code that cannot read the
+> current schema. Everything else below — running migrations, choosing when,
+> handling failures — remains the app's responsibility by design. Leave the
+> setting unset and the check is skipped.
+
 Code deploys are reversible — swap back to the previous slot in seconds. Database migrations are not. This asymmetry is the single most dangerous aspect of agent-authored deploys.
 
 ## What Goes Wrong

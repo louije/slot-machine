@@ -37,23 +37,68 @@ before traffic switches. The old process drains gracefully. If the new process
 fails health checks, it's killed and the live slot stays untouched. Rollback
 is always one command away.
 
-For that to happen, the daemon manages three **slots** — git worktrees of the app:
+## What a deploy checks
+
+Every deploy — from the agent or from your terminal — runs the same pipeline,
+and stops at the first thing that fails:
+
+```
+resolve   commit must exist                    → else 400
+gate      protected paths, secrets, diff size,
+          and "would this delete work that main has?"
+prepare   check the commit out into staging
+setup     setup_command
+verify    pre_deploy_command (your test suite)  → non-zero blocks promotion
+boot      start the process on a fresh port
+probe     health_endpoint, then schema_status
+promote   switch the proxy, drain the old process
+```
+
+The gate runs **before** `setup_command`, because `bun install` and `npm ci`
+execute code from the commit being deployed — a secret scan that runs after that
+has already lost. `verify` runs after, because a test suite needs its
+dependencies.
+
+A refused deploy names the stage and the reason, and the live slot is untouched:
+
+```
+$ slot-machine deploy
+deploy failed at gate: secret scan: an added line in deploy.sh matches
+gh[pousr]_[A-Za-z0-9]{36} — remove the credential, or add a narrower rule to
+secret_patterns if this is a false positive
+```
+
+There is deliberately **no override flag**. The agent runs as the same user as
+the daemon, with a shell, and the API is on localhost — so any override reachable
+from your terminal is equally reachable by the agent, and would be decoration
+rather than a control. The gate is a guardrail against a confused agent, not a
+boundary against an adversarial one. To bypass it, change `slot-machine.json`
+and restart: deliberate, and out of band.
+
+For that to happen, the daemon manages four **slots** — git worktrees of the app:
 
 - **live** — serving traffic through the reverse proxy
 - **prev** — the previous deploy, ready for instant rollback
-- **staging** — a workspace where the chat agent reads, edits, and deploys code
+- **staging** — where a deploy is prepared and health-checked before promotion
+- **machine** — the agent's own worktree, checked out on the `machine` branch
+
+The machine slot belongs to the agent. slot-machine never renames it, never
+force-checks-it-out and never garbage-collects it, so dependencies and
+uncommitted work survive deploys and daemon restarts. Deploys happen entirely in
+the staging slot, which means the agent can keep working while its own change is
+being promoted.
 
 ```
   ┌──────────────────────────────────────────────────────────────┐
   │                    slot-machine daemon                       │
   │                                                              │
-  │   ┌───────────────┐  ┌───────────────┐  ┌───────────────┐    │
-  │   │  slot-a3f2... │  │  slot-7c36... │  │  slot-staging │    │
-  │   │  (prev)       │  │  (live)       │  │  (workspace)  │    │
-  │   │               │  │               │  │               │    │
-  │   │  rollback     │  │  :51234 app   │  │  chat agent   │    │
-  │   │  target       │  │  :51235 int   │  │  works here   │    │
-  │   └───────────────┘  └───────┬───────┘  └───────────────┘    │
+  │  ┌──────────────┐ ┌──────────────┐ ┌───────────┐ ┌────────┐ │
+  │  │ slot-a3f2... │ │ slot-7c36... │ │slot-staging│ │machine │ │
+  │  │ (prev)       │ │ (live)       │ │(deploys)  │ │(agent) │ │
+  │  │              │ │              │ │           │ │        │ │
+  │  │ rollback     │ │ :51234 app   │ │ gate +    │ │ branch │ │
+  │  │ target       │ │ :51235 int   │ │ health    │ │ machine│ │
+  │  └──────────────┘ └──────┬───────┘ └───────────┘ └────────┘ │
   │                              │                               │
   │                     reverse proxy                            │
   │                     :3000 ──►┘                               │
@@ -153,8 +198,21 @@ All fields in `slot-machine.json`:
 | `shared_dirs` | `[]` | Directories symlinked across deploys (e.g. `["data", "uploads"]`) |
 | `agent_auth` | `hmac` | Agent auth mode (see below) |
 | `agent_allowed_tools` | Bash, Edit, Read, Write, Glob, Grep | Claude tools the agent can use |
+| `agent_model` | CLI default | `claude --model`. Unset means the run inherits the server user's `~/.claude/settings.json` |
+| `agent_timeout_s` | `1800` | Max seconds for one agent turn before it is stopped |
+| `machine_branch` | `machine` | Branch the agent commits to |
+| `human_branch` | `main` | Branch you commit to |
+| `protected_paths` | `[]` | Paths a deploy may not modify |
+| `secret_patterns` | `[]` | Extra regexes, added to the built-in credential patterns |
+| `max_diff_lines` | `0` (off) | Reject a deploy whose diff is larger than this |
+| `pre_deploy_command` | — | Run in staging after setup; non-zero blocks promotion |
+| `pre_deploy_timeout_ms` | `120000` | How long `pre_deploy_command` may take |
+| `schema_status_endpoint` | — | Path serving schema compatibility (see Migrations) |
 | `chat_title` | `slot-machine` | Title shown in the chat header |
 | `chat_accent` | `#2563eb` | CSS accent color for the chat UI |
+
+Missing values get the defaults above. A config that fails validation stops the
+daemon with the reason rather than starting in a broken state.
 
 ### Auth modes
 
@@ -215,6 +273,49 @@ The agent's file tools are scoped to the staging directory and cannot access
 `~/.ssh/`. Deny rules also block `Read`, `Bash(cat ...)`, and similar commands
 on `~/.ssh/*`.
 
+### Branch model
+
+You commit to `main`. The agent commits to `machine`, in its own worktree. It
+merges your work before changing code:
+
+```sh
+git fetch origin main && git merge origin/main
+```
+
+That merge is the agent's job — it understands the codebase and can resolve
+conflicts contextually. slot-machine's job is to *notice* when it hasn't
+happened. `slot-machine status` reports how far the branches have drifted, and
+one case is refused outright: deploying a commit whose tree is missing files
+that `main` has. That would delete your work from production with no conflict
+and no error, which is the only divergence failure that is completely silent.
+
+Ordinary drift is reported, not blocked — the agent has to be able to deploy
+while it catches up.
+
+### Migrations
+
+Code deploys are reversible in seconds; migrations are not. slot-machine's
+involvement is purely observational: set `schema_status_endpoint` and the app
+serves
+
+```json
+{
+  "current_schema_version": 42,
+  "code_min_schema_version": 41,
+  "code_max_schema_version": 43,
+  "pending_migrations": [],
+  "compatible": true
+}
+```
+
+The orchestrator reads it after the health check — on deploys *and* on
+rollbacks — and refuses to promote code that cannot read the current schema.
+It never connects to the database, never parses SQL, and never runs a
+migration. The dangerous case it catches is rolling back to code that predates
+a migration which has already run.
+
+Leave `schema_status_endpoint` unset and the check is skipped entirely.
+
 ### Custom styling
 
 A `chat.css` in the project root overrides CSS variables:
@@ -243,7 +344,7 @@ slot-machine injects these into the app process:
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Health check |
-| `POST` | `/deploy` | `{"commit":"abc..."}` → deploy |
+| `POST` | `/deploy` | `{"commit":"abc..."}` → deploy. On failure returns `stage` and `error` |
 | `POST` | `/rollback` | Swap to previous slot |
 | `GET` | `/status` | Current state |
 
@@ -257,6 +358,7 @@ slot-machine injects these into the app process:
 | `GET` | `/agent/conversations` | List conversations |
 | `POST` | `/agent/conversations` | Create conversation |
 | `GET` | `/agent/conversations/:id` | Conversation with messages |
+| `DELETE` | `/agent/conversations/:id` | Delete a conversation (409 while its agent is working) |
 | `POST` | `/agent/conversations/:id/messages` | Send message |
 | `GET` | `/agent/conversations/:id/stream` | SSE stream (`system`, `assistant`, `tool_use`, `tool_result`, `done`, `status`) |
 | `POST` | `/agent/conversations/:id/cancel` | Kill running agent |
@@ -270,11 +372,16 @@ go test ./...
 Black-box spec tests in `spec/` cover the full contract: deploy, rollback,
 health checks, crash detection, drain timeout, concurrent deploy rejection,
 zero-downtime switching, symlink persistence, GC, daemon restart recovery,
-agent streaming, and CLI behavior. Unit tests in `cmd/slot-machine/`.
+agent streaming, the pre-promotion gate, the machine slot, and CLI behavior.
+Unit tests in `cmd/slot-machine/`.
+
+CI runs `gofmt`, `go vet` and the full suite on every push.
 
 ## TODO
 
-- [ ] Implement migration policy
+- [ ] Reconciliation loop: poll the remote for pushes the webhook missed
+- [ ] Alert webhook on consecutive failed deploys
+- [ ] Periodic `git gc` and disk-pressure checks
 
 ## License
 
