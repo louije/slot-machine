@@ -68,8 +68,25 @@ func main() {
 		*prompt = flag.Arg(0)
 	}
 
-	// Behaviour switches for failure-path tests, read from the environment
-	// because the real CLI has no equivalent flags.
+	// Behaviour switches, read from the environment because the real CLI has no
+	// equivalent flags and slot-machine builds argv itself. The daemon passes
+	// its own environment through to the agent, so a test sets these on the
+	// daemon process.
+	//
+	// TESTAGENT_DURATION is what lets a test pin down how long the agent lives
+	// instead of racing it. A test that needs the agent to still be running
+	// after some other operation completes must not depend on that operation
+	// being faster than a fixed event count.
+	if d := os.Getenv("TESTAGENT_DURATION"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil {
+			*duration = n
+		}
+	}
+	if iv := os.Getenv("TESTAGENT_INTERVAL"); iv != "" {
+		if n, err := strconv.Atoi(iv); err == nil {
+			*interval = n
+		}
+	}
 	if code := os.Getenv("TESTAGENT_EXIT_CODE"); code != "" {
 		if msg := os.Getenv("TESTAGENT_STDERR"); msg != "" {
 			fmt.Fprintln(os.Stderr, msg)

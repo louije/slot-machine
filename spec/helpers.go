@@ -546,6 +546,15 @@ func testagentBinary(t *testing.T) string {
 // If release is non-nil, it is called immediately before starting the process.
 func startOrchestratorWithAgent(t *testing.T, binary, contractPath, repoDir string, apiPort int, agentBin string, release func()) *Orchestrator {
 	t.Helper()
+	return startOrchestratorWithAgentEnv(t, binary, contractPath, repoDir, apiPort, agentBin, release, nil)
+}
+
+// startOrchestratorWithAgentEnv additionally sets environment variables on the
+// daemon. The daemon passes its environment through to the agent it spawns, so
+// this is how a test controls testagent's behaviour — slot-machine builds the
+// agent's argv itself, so there is no flag for a test to pass.
+func startOrchestratorWithAgentEnv(t *testing.T, binary, contractPath, repoDir string, apiPort int, agentBin string, release func(), extraEnv []string) *Orchestrator {
+	t.Helper()
 
 	dataDir := t.TempDir()
 
@@ -558,6 +567,7 @@ func startOrchestratorWithAgent(t *testing.T, binary, contractPath, repoDir stri
 		"--no-proxy",
 	)
 	cmd.Env = append(os.Environ(), "SLOT_MACHINE_AGENT_BIN="+agentBin)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

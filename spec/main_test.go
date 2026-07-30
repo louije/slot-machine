@@ -19,7 +19,18 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// Build orchestrator if ORCHESTRATOR_BIN is not already set.
+	// Rebuild every binary the suite drives, unconditionally.
+	//
+	// These used to be built only when the file was absent, which meant the
+	// suite silently tested whatever binary happened to be on disk. That is not
+	// a theoretical hazard: when --verbose was added to the agent invocation and
+	// mirrored into spec/testagent, a developer with a pre-existing
+	// spec/testagent/testagent kept running the old one, so three agent tests
+	// failed with no visible cause — and passed again after any unrelated manual
+	// rebuild. It reads exactly like flakiness and is not.
+	//
+	// go build is incremental, so an up-to-date binary costs a few milliseconds.
+	// That is a very cheap price for never debugging a stale artifact again.
 	if os.Getenv("ORCHESTRATOR_BIN") == "" {
 		bin := filepath.Join(root, "slot-machine")
 		if err := goBuild(root, bin, "./cmd/slot-machine/"); err != nil {
@@ -29,20 +40,12 @@ func TestMain(m *testing.M) {
 		os.Setenv("ORCHESTRATOR_BIN", bin)
 	}
 
-	// Build testapp if not already present.
-	testappPath := filepath.Join(root, "spec", "testapp", "testapp")
-	if _, err := os.Stat(testappPath); err != nil {
-		if err := goBuild(root, testappPath, "./spec/testapp/"); err != nil {
-			fmt.Fprintf(os.Stderr, "building testapp: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	// Build testagent if not already present.
-	testagentPath := filepath.Join(root, "spec", "testagent", "testagent")
-	if _, err := os.Stat(testagentPath); err != nil {
-		if err := goBuild(root, testagentPath, "./spec/testagent/"); err != nil {
-			fmt.Fprintf(os.Stderr, "building testagent: %v\n", err)
+	for _, b := range []struct{ out, pkg string }{
+		{filepath.Join(root, "spec", "testapp", "testapp"), "./spec/testapp/"},
+		{filepath.Join(root, "spec", "testagent", "testagent"), "./spec/testagent/"},
+	} {
+		if err := goBuild(root, b.out, b.pkg); err != nil {
+			fmt.Fprintf(os.Stderr, "building %s: %v\n", b.pkg, err)
 			os.Exit(1)
 		}
 	}

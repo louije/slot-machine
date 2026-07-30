@@ -26,9 +26,10 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # The spec suite starts real daemons, apps and agents and binds real
-      # ports. -p 1 keeps packages sequential; -parallel 2 keeps the process
-      # count inside the spec package low enough that health-check timeouts
-      # measure the code rather than the runner's load.
+      # -p 1 keeps the two packages sequential: both spawn real daemons, apps
+      # and agents, and running them at once doubles the process pressure on a
+      # small runner for no benefit. Within a package the default parallelism is
+      # fine — the suite has been run at 2x CPU oversubscription without a
+      # failure.
       - name: Test
-        run: go test -p 1 -parallel 2 ./...
+        run: go test -p 1 ./...

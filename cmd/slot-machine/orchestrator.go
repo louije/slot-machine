@@ -111,6 +111,10 @@ type statusResponse struct {
 	LastDeployTime string            `json:"last_deploy_time"`
 	Healthy        bool              `json:"healthy"`
 	Deploying      bool              `json:"deploying"`
+	// ProxyListening reports whether the public port is actually bound. A
+	// daemon whose proxy failed to listen used to report itself perfectly
+	// healthy while nothing could reach the app.
+	ProxyListening bool `json:"proxy_listening"`
 }
 
 func (o *orchestrator) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -123,12 +127,13 @@ func (o *orchestrator) handleStatus(w http.ResponseWriter, r *http.Request) {
 	defer o.mu.Unlock()
 
 	resp := statusResponse{
-		StagingDir:    stagingSlotName,
-		MachineDir:    machineSlotName,
-		MachineBranch: o.cfg.MachineBranch,
-		MachineCommit: machineCommit,
-		Divergence:    divergence,
-		Deploying:     o.deploying,
+		StagingDir:     stagingSlotName,
+		MachineDir:     machineSlotName,
+		MachineBranch:  o.cfg.MachineBranch,
+		MachineCommit:  machineCommit,
+		Divergence:     divergence,
+		Deploying:      o.deploying,
+		ProxyListening: o.appProxy.listening(),
 	}
 
 	if o.liveSlot != nil {

@@ -182,7 +182,12 @@ func TestAgentSurvivesDeploy(t *testing.T) {
 	repo := setupTestRepo(t, appBin, appPort, intPort)
 	contract := writeTestContract(t, t.TempDir(), appPort, intPort, 0)
 
-	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin, release)
+	// The agent must still be running when the deploy lands, and a deploy under
+	// load can take longer than a fixed number of agent events. Give the agent a
+	// lifetime that outlasts any plausible deploy so this tests process survival
+	// rather than which of the two finishes first.
+	orch := startOrchestratorWithAgentEnv(t, bin, contract, repo.Dir, apiPort, agentBin, release,
+		[]string{"TESTAGENT_DURATION=200", "TESTAGENT_INTERVAL=200"})
 	_ = orch
 
 	// 1. Deploy app A.

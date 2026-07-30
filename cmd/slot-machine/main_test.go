@@ -328,6 +328,20 @@ func TestDynamicProxyLifecycle(t *testing.T) {
 		conn.Close()
 		t.Fatal("expected connection refused after clearTarget")
 	}
+
+	// Re-binding after a clear must work: listen() retries briefly so an
+	// in-flight close does not make the next deploy lose its own port.
+	p.setTarget(bPort)
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err = http.Get(fmt.Sprintf("http://%s/", addr))
+	if err != nil {
+		t.Fatalf("proxy did not come back after clearTarget: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 after re-target, got %d", resp.StatusCode)
+	}
 }
 
 func TestOrchestratorServeHTTP(t *testing.T) {
