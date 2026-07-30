@@ -716,6 +716,11 @@ func writeTestContractWithAuth(t *testing.T, dir string, port, internalPort, dra
 		"health_timeout_ms": 8000,
 		"drain_timeout_ms":  drainTimeoutMs,
 		"agent_auth":        authMode,
+		// Explicit, because the default is "allAuth" and these tests are about
+		// what happens when the app is the one deciding. A test that relied on
+		// the default would silently stop exercising delegation the moment the
+		// default changed — which is exactly what it just did.
+		"agent_access": "app",
 	})
 }
 

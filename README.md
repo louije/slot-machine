@@ -212,7 +212,7 @@ All fields in `slot-machine.json`:
 | `listen` | `127.0.0.1` | Bind address for `port` and `internal_port`. Widen only when the authenticating proxy is on another host |
 | `agent_auth` | `header` | Where the already-authenticated identity comes from (see below) |
 | `agent_auth_header` | `X-Authenticated-User` | Header carrying that identity |
-| `agent_access` | `app` | Who, among authenticated users, may use the agent (see below) |
+| `agent_access` | `allAuth` | Who, among authenticated users, may use the agent (see below) |
 | `agent_access_endpoint` | `/_slot_machine/access` | Where the app answers that question, on its internal port |
 | `agent_allowed_tools` | Bash, Edit, Read, Write, Glob, Grep | Claude tools the agent can use |
 | `agent_model` | CLI default | `claude --model`. Unset means the run inherits the server user's `~/.claude/settings.json` |
@@ -243,9 +243,16 @@ Tailscale in front; that is the deployment model, not one option among several.
 | `header` | Default. Read `agent_auth_header`. No header, `401` — on every route, `/chat` included. |
 | `none` | No identity at all; every request is `local`. Local development only. |
 
-Authentication says who you are. **Authorization is the app's job**, because
-"who is an admin" is a row in the app's database and no identity provider knows
-about it. slot-machine asks, on the app's internal port:
+Authentication says who you are. `agent_access` says which of those people may
+drive an agent that commits and deploys.
+
+| `agent_access` | Behaviour |
+|------|------------|
+| `allAuth` | Default. Every authenticated user. Not "open": the door in front still decides who is authenticated at all, and for a webauthn or SSO front that is a named, enrolled set of people. |
+| `app` | Ask the running app. Opt into this when "authenticated" and "allowed" are different sets. |
+
+With `app`, slot-machine asks over the app's **internal** port — so the question
+cannot be put to it from outside:
 
 ```
 GET /_slot_machine/access        →  {"access": "allAuth"}   any authenticated user
@@ -260,13 +267,17 @@ get '/_slot_machine/access' do
 end
 ```
 
-Set `agent_access: "allAuth"` to skip the call for an app you cannot modify.
+The proxy's identity headers are forwarded verbatim, so an app can answer from an
+SSO group claim instead of its own tables. slot-machine assigns them no meaning —
+there is no group-to-permission mapping anywhere in this repository. The caller's
+`Cookie` and `Authorization` are not forwarded.
 
-Anything that is not a clean yes is a no — including **no live app**, which
-means no chat until a deploy succeeds. Granting access when nothing is running
-would let a failed deploy widen who can reach the agent. Recover over SSH: the
-API port is loopback and unauthenticated, so `slot-machine status` and
-`slot-machine rollback` work when the chat does not.
+Under `app`, anything that is not a clean yes is a no — a missing endpoint, a
+timeout, an unparseable answer, and **no live app**, which means no chat until a
+deploy succeeds. Granting when nothing is running would let a failed deploy widen
+who can reach the agent. Recover over SSH: the API port is loopback and
+unauthenticated, so `slot-machine status` and `slot-machine rollback` work when
+the chat does not.
 
 See [docs/agent.md](docs/agent.md#security) for the full table of failure modes.
 

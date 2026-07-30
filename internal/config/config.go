@@ -54,11 +54,15 @@ type Config struct {
 
 	// AgentAccess selects who, among authenticated users, may use the agent.
 	//
-	//	"app"     — ask the live app over AgentAccessEndpoint. The app owns its
-	//	            own user model, so it is the only thing that can answer.
-	//	            This is the default.
-	//	"allAuth" — every authenticated user may. For an app that cannot be
-	//	            modified to answer, or one where the distinction is moot.
+	//	"allAuth" — every authenticated user may. This is the default: bring
+	//	            your own door. Not "open" — authentication is still
+	//	            mandatory and still fails closed, so this means everyone
+	//	            the proxy in front already admitted, which for a webauthn
+	//	            or SSO front is a named, enrolled set of people.
+	//	"app"     — ask the live app over AgentAccessEndpoint. Opt into this
+	//	            when "authenticated" and "allowed" are different sets:
+	//	            "admin" is a row in the app's database, and the app is the
+	//	            only thing that can answer.
 	//
 	// Ignored entirely when AgentAuth is "none": there is no identity to
 	// authorize.
@@ -142,7 +146,7 @@ func (c *Config) applyDefaults() {
 		c.AgentAuthHeader = "X-Authenticated-User"
 	}
 	if c.AgentAccess == "" {
-		c.AgentAccess = "app"
+		c.AgentAccess = "allAuth"
 	}
 	if c.AgentAccessEndpoint == "" {
 		c.AgentAccessEndpoint = "/_slot_machine/access"

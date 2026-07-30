@@ -66,10 +66,10 @@ func TestConfigAppliesDocumentedDefaults(t *testing.T) {
 		t.Errorf("agent_auth_header = %q, want X-Authenticated-User (what Caddy's "+
 			"forward_auth and oauth2-proxy set)", cfg.AgentAuthHeader)
 	}
-	if cfg.AgentAccess != "app" {
-		t.Errorf("agent_access = %q, want app. The app owns its user model; deferring "+
-			"to it by default is what keeps a second roster out of this config.",
-			cfg.AgentAccess)
+	if cfg.AgentAccess != "allAuth" {
+		t.Errorf("agent_access = %q, want allAuth. Bring your own door: an app that "+
+			"does nothing keeps working, and delegating to the app is the opt-in for "+
+			"when authenticated and allowed are different sets.", cfg.AgentAccess)
 	}
 	if cfg.AgentAccessEndpoint != "/_slot_machine/access" {
 		t.Errorf("agent_access_endpoint = %q", cfg.AgentAccessEndpoint)

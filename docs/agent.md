@@ -540,15 +540,22 @@ trusts is a header a misconfigured proxy can let a client assert.
 > protection and rotation, and the proxy in front already does all three. A
 > config naming `hmac` now refuses to start.
 
-### Authorization: the app decides
+### Authorization: bring your own door, or let the app decide
 
 Authentication says who you are. It does not say whether you may drive an agent
-that can commit and deploy. For anything beyond a single-operator instance those
-are different questions, and only the app can answer the second one: "admin"
-means a row in *its* database, which no identity provider knows about.
+that can commit and deploy.
 
-So slot-machine asks it, on the app's `INTERNAL_PORT` — never the public one, so
-the question cannot be solicited from outside:
+`agent_access` defaults to **`allAuth`**: every authenticated user. That is not
+"open" — authentication is still mandatory and still fails closed, so it means
+everyone the proxy in front already admitted. Behind webauthn or SSO that is a
+named, enrolled set of people, and for a single-operator instance it is exactly
+right. It also means an app that does nothing at all keeps working.
+
+Set `agent_access: "app"` when "authenticated" and "allowed" are different sets —
+internal software where only some colleagues should reach the agent. Only the app
+can answer that: "admin" means a row in *its* database, which no identity
+provider knows about. So slot-machine asks it, on the app's `INTERNAL_PORT` —
+never the public one, so the question cannot be solicited from outside:
 
 ```
 GET /_slot_machine/access
@@ -582,10 +589,7 @@ The caller's `Cookie` and `Authorization` headers are **not** forwarded. They
 belong to the session with the proxy and have no business reaching an internal
 endpoint.
 
-Set `agent_access: "allAuth"` to skip the call entirely, for an app you cannot
-modify.
-
-#### Everything that is not a clean yes is a no
+#### Under `app`, everything that is not a clean yes is a no
 
 | Situation | Result |
 |---|---|
@@ -595,11 +599,19 @@ modify.
 | App errors, times out, redirects, or returns anything unparseable | `503` |
 | **No app is live** | `503` |
 
-The last row is the one to understand before deploying this. With no live app
+The last row is the one to understand before choosing `app`. With no live app
 there is no authority to ask, and granting access in that state would mean a
 failed deploy widens who can use the agent — in the state nobody is watching. So
-a fresh box has no chat until its first successful deploy, and a totally broken
-app has no chat until it is fixed. Fix it over SSH; the API port is still there.
+under `app`, a fresh box has no chat until its first successful deploy, and a
+totally broken app has no chat until it is fixed. Fix it over SSH; the API port
+is still there.
+
+Under the default `allAuth` this does not arise: nothing is being delegated, so
+there is nothing to be unable to ask, and the chat stays reachable through a
+failed deploy — which is when you most want it. That is the trade the two modes
+make. `app` buys you per-user control at the cost of depending on the app being
+up; `allAuth` buys you availability at the cost of treating everyone the door
+admits alike.
 
 `403` and `503` are kept distinct on purpose. A `403` says the app considered you
 and declined. A `503` says nothing was decided, and points at the app.

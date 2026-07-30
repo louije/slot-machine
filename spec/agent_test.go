@@ -533,6 +533,7 @@ func TestAgentRefusesWhenNoAppIsLive(t *testing.T) {
 		"health_timeout_ms": 1500,
 		"drain_timeout_ms":  500,
 		"agent_auth":        "header",
+		"agent_access":      "app",
 	})
 
 	startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
