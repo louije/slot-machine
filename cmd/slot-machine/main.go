@@ -23,18 +23,29 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"slot-machine/internal/agent"
+	"slot-machine/internal/agent/store"
+	"slot-machine/internal/config"
+	"slot-machine/internal/orchestrator"
 )
 
 // Version is injected at build time via -ldflags="-X main.Version=v1.0.0".
 var Version = "dev"
 
 func main() {
+	// One prefix, no timestamps: this runs under systemd or launchd, both of
+	// which already stamp every line.
+	log.SetFlags(0)
+	log.SetPrefix("slot-machine: ")
+
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: slot-machine <command> [args]")
 		fmt.Fprintln(os.Stderr, "")
@@ -87,7 +98,6 @@ func cmdStart(args []string) {
 	fs.Parse(args)
 
 	cwd, _ := os.Getwd()
-
 	if *configPath == "" {
 		*configPath = filepath.Join(cwd, "slot-machine.json")
 	}
@@ -98,7 +108,7 @@ func cmdStart(args []string) {
 		*dataDir = filepath.Join(*repoDir, ".slot-machine")
 	}
 
-	cfg, err := loadConfig(*configPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "error: cannot read %s\n", *configPath)
@@ -119,25 +129,16 @@ func cmdStart(args []string) {
 		fmt.Fprintf(os.Stderr, "error resolving repo path: %v\n", err)
 		os.Exit(1)
 	}
-
-	os.MkdirAll(*dataDir, 0755)
-
-	appProxyAddr := ""
-	if cfg.Port != 0 {
-		appProxyAddr = fmt.Sprintf(":%d", cfg.Port)
-	}
-	intProxyAddr := ""
-	if cfg.InternalPort != 0 && cfg.InternalPort != cfg.Port {
-		intProxyAddr = fmt.Sprintf(":%d", cfg.InternalPort)
+	if err := os.MkdirAll(*dataDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "error creating data directory: %v\n", err)
+		os.Exit(1)
 	}
 
-	// Auth setup.
-	authMode := cfg.AgentAuth
-	if authMode == "" {
-		authMode = "hmac"
-	}
+	// The HMAC secret is generated per daemon session and handed to app
+	// processes, never to the agent. See docs/agent.md on why this is identity
+	// labelling rather than authentication.
 	var authSecret string
-	if authMode == "hmac" {
+	if cfg.AgentAuth == "hmac" {
 		secretBytes := make([]byte, 32)
 		if _, err := rand.Read(secretBytes); err != nil {
 			fmt.Fprintf(os.Stderr, "error generating auth secret: %v\n", err)
@@ -145,37 +146,30 @@ func cmdStart(args []string) {
 		}
 		authSecret = hex.EncodeToString(secretBytes)
 	}
-	fmt.Printf("agent auth: %s\n", authMode)
+	fmt.Printf("agent auth: %s\n", cfg.AgentAuth)
+	reportAgentCredentials()
 
-	if os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" {
-		fmt.Println("agent auth source: oauth token")
-	} else if home, err := os.UserHomeDir(); err == nil {
-		if _, err := os.Stat(filepath.Join(home, ".claude", ".credentials.json")); err == nil {
-			fmt.Println("agent auth source: credentials file")
-		}
-	}
-
-	store, err := openAgentStore(filepath.Join(*dataDir, "agent.db"))
+	st, err := store.Open(filepath.Join(*dataDir, "agent.db"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error opening agent store: %v\n", err)
 		os.Exit(1)
 	}
 
-	mgr := newAgentManager(store)
+	mgr := agent.NewManager(st)
 
 	// Reconcile the database with reality before accepting work: an agent
 	// process that outlived the previous daemon is still holding the machine
 	// slot and can still commit and deploy from it.
-	if n, err := mgr.reapOrphans(); err != nil {
+	if n, err := mgr.ReapOrphans(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not recover agent sessions: %v\n", err)
 	} else if n > 0 {
 		fmt.Printf("recovered %d interrupted agent session(s)\n", n)
 	}
 
-	agentBin := resolveClaude(*dataDir)
+	agentBin := agent.ResolveClaude(*dataDir)
 	if agentBin == "" {
 		var installErr error
-		agentBin, installErr = installClaude(*dataDir)
+		agentBin, installErr = agent.InstallClaude(*dataDir)
 		if installErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", installErr)
 			fmt.Fprintln(os.Stderr, "set SLOT_MACHINE_AGENT_BIN to the claude binary path")
@@ -185,78 +179,75 @@ func cmdStart(args []string) {
 		fmt.Printf("agent binary: %s\n", agentBin)
 	}
 
-	agent := &agentService{
-		store:          store,
-		manager:        mgr,
-		agentBin:       agentBin,
-		workDir:        filepath.Join(*dataDir, machineSlotName),
-		repoDir:        absRepo,
-		configPath:     *configPath,
-		dataDir:        *dataDir,
-		authMode:       authMode,
-		authSecret:     authSecret,
-		allowedTools:   cfg.AgentAllowedTools,
-		deniedCommands: cfg.AgentDeniedCommands,
-		model:          cfg.AgentModel,
-		timeout:        time.Duration(cfg.AgentTimeoutS) * time.Second,
-		machineBranch:  cfg.MachineBranch,
-		humanBranch:    cfg.HumanBranch,
-		chatTitle:      cfg.ChatTitle,
-		chatAccent:     cfg.ChatAccent,
-		envFunc: func() []string {
+	svc := agent.NewService(agent.Options{
+		Store:          st,
+		Manager:        mgr,
+		Bin:            agentBin,
+		WorkDir:        filepath.Join(*dataDir, orchestrator.MachineSlotName),
+		DataDir:        *dataDir,
+		ConfigPath:     *configPath,
+		AuthMode:       cfg.AgentAuth,
+		AuthSecret:     authSecret,
+		AllowedTools:   cfg.AgentAllowedTools,
+		DeniedCommands: cfg.AgentDeniedCommands,
+		Model:          cfg.AgentModel,
+		Timeout:        time.Duration(cfg.AgentTimeoutS) * time.Second,
+		MachineBranch:  cfg.MachineBranch,
+		HumanBranch:    cfg.HumanBranch,
+		ChatTitle:      cfg.ChatTitle,
+		ChatAccent:     cfg.ChatAccent,
+		Env: func() []string {
 			env := os.Environ()
 			if cfg.EnvFile != "" {
 				envPath := cfg.EnvFile
 				if !filepath.IsAbs(envPath) {
 					envPath = filepath.Join(absRepo, envPath)
 				}
-				if extra, err := loadEnvFile(envPath); err == nil {
+				if extra, err := config.LoadEnvFile(envPath); err == nil {
 					env = append(env, extra...)
 				}
 			}
 			return env
 		},
-	}
+	})
 
-	o := &orchestrator{
-		cfg:        cfg,
-		repoDir:    absRepo,
-		dataDir:    *dataDir,
-		authSecret: authSecret,
-		appProxy:   newDynamicProxy(appProxyAddr, agent),
-		intProxy:   newDynamicProxy(intProxyAddr, nil),
-	}
+	o := orchestrator.New(orchestrator.Options{
+		Config:     cfg,
+		RepoDir:    absRepo,
+		DataDir:    *dataDir,
+		AuthSecret: authSecret,
+		Intercept:  svc,
+	})
 
-	o.warnTrackedSharedDirs()
+	o.WarnTrackedSharedDirs()
 
 	// The agent's worktree. Created once and never rewritten by the daemon, so
 	// it survives deploys and restarts with its dependencies and any
 	// uncommitted work intact.
-	if err := o.ensureMachineSlot(); err != nil {
+	if err := o.EnsureMachineSlot(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 		fmt.Fprintln(os.Stderr, "the chat agent will not be able to work until this is resolved")
 	} else {
-		fmt.Printf("machine slot: %s (branch %s)\n", o.machineDir(), cfg.MachineBranch)
+		fmt.Printf("machine slot: %s (branch %s)\n", o.MachineDir(), cfg.MachineBranch)
 	}
 
 	// Recover state from symlinks, or auto-deploy HEAD.
-	o.recoverState()
-	if o.liveSlot == nil {
-		commit, err := gitHeadCommit(absRepo)
+	o.RecoverState()
+	if o.LiveCommit() == "" {
+		commit, err := orchestrator.HeadCommit(absRepo)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cannot determine HEAD: %v\n", err)
 		} else {
-			fmt.Printf("auto-deploying HEAD (%s)...\n", shortHash(commit))
-			resp, _ := o.doDeploy(commit)
+			fmt.Printf("auto-deploying HEAD (%s)...\n", orchestrator.ShortHash(commit))
+			resp, _ := o.Deploy(commit)
 			if resp.Success {
-				fmt.Printf("deployed %s to %s\n", shortHash(resp.Commit), resp.Slot)
+				fmt.Printf("deployed %s to %s\n", orchestrator.ShortHash(resp.Commit), resp.Slot)
 			} else {
-				fmt.Fprintf(os.Stderr, "auto-deploy failed: %s\n", resp.Error)
+				fmt.Fprintf(os.Stderr, "auto-deploy failed at %s: %s\n", resp.Stage, resp.Error)
 			}
 		}
 	}
 
-	// API server.
 	apiAddr := fmt.Sprintf(":%d", apiPort)
 	apiSrv := &http.Server{Addr: apiAddr, Handler: o}
 
@@ -265,11 +256,9 @@ func cmdStart(args []string) {
 	go func() {
 		<-sigCh
 		fmt.Println("\nshutting down...")
-		mgr.stop()
-		o.drainAll()
-		o.appProxy.shutdown()
-		o.intProxy.shutdown()
-		store.close()
+		mgr.Stop()
+		o.Shutdown()
+		st.Close()
 		apiSrv.Shutdown(context.Background())
 	}()
 
@@ -278,6 +267,23 @@ func cmdStart(args []string) {
 		fmt.Fprintf(os.Stderr, "listen: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// reportAgentCredentials says which credential the agent will use, because "the
+// agent does nothing" is otherwise indistinguishable from "there is no token".
+func reportAgentCredentials() {
+	if os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" {
+		fmt.Println("agent auth source: oauth token")
+		return
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".claude", ".credentials.json")); err == nil {
+			fmt.Println("agent auth source: credentials file")
+			return
+		}
+	}
+	fmt.Fprintln(os.Stderr, "warning: no Claude credentials found; "+
+		"set CLAUDE_CODE_OAUTH_TOKEN or run `claude login`")
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +298,7 @@ func cmdDeploy(args []string) {
 
 	if commit == "" {
 		cwd, _ := os.Getwd()
-		c, err := gitHeadCommit(cwd)
+		c, err := orchestrator.HeadCommit(cwd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: cannot determine HEAD commit: %v\n", err)
 			os.Exit(1)
@@ -313,11 +319,11 @@ func cmdDeploy(args []string) {
 	}
 	defer resp.Body.Close()
 
-	var dr deployResponse
+	var dr orchestrator.DeployResponse
 	json.NewDecoder(resp.Body).Decode(&dr)
 
 	if dr.Success {
-		fmt.Printf("deployed %s to %s\n", shortHash(dr.Commit), dr.Slot)
+		fmt.Printf("deployed %s to %s\n", orchestrator.ShortHash(dr.Commit), dr.Slot)
 	} else {
 		fmt.Fprintf(os.Stderr, "deploy failed: %s\n", dr.Error)
 		os.Exit(1)
@@ -341,11 +347,11 @@ func cmdRollback() {
 	}
 	defer resp.Body.Close()
 
-	var rr rollbackResponse
+	var rr orchestrator.RollbackResponse
 	json.NewDecoder(resp.Body).Decode(&rr)
 
 	if rr.Success {
-		fmt.Printf("rolled back to %s (%s)\n", shortHash(rr.Commit), rr.Slot)
+		fmt.Printf("rolled back to %s (%s)\n", orchestrator.ShortHash(rr.Commit), rr.Slot)
 	} else {
 		fmt.Fprintf(os.Stderr, "rollback failed: %s\n", rr.Error)
 		os.Exit(1)
@@ -365,7 +371,7 @@ func cmdStatus() {
 	}
 	defer resp.Body.Close()
 
-	var sr statusResponse
+	var sr orchestrator.StatusResponse
 	json.NewDecoder(resp.Body).Decode(&sr)
 
 	healthy := "no"
@@ -455,7 +461,7 @@ func readAPIPort() int {
 	for {
 		data, err := os.ReadFile(filepath.Join(dir, "slot-machine.json"))
 		if err == nil {
-			var cfg config
+			var cfg config.Config
 			json.Unmarshal(data, &cfg)
 			if cfg.APIPort != 0 {
 				return cfg.APIPort

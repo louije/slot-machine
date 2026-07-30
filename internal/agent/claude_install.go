@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"fmt"
@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 )
 
-// resolveClaude finds the claude binary. Search order:
+// ResolveClaude finds the claude binary. Search order:
 // 1. SLOT_MACHINE_AGENT_BIN env var
 // 2. <dataDir>/.local/bin/claude (managed install)
 // 3. ~/.local/bin/claude (user install)
 // 4. PATH lookup
-func resolveClaude(dataDir string) string {
+func ResolveClaude(dataDir string) string {
 	if bin := os.Getenv("SLOT_MACHINE_AGENT_BIN"); bin != "" {
 		if _, err := os.Stat(bin); err == nil {
 			return bin
@@ -38,8 +38,8 @@ func resolveClaude(dataDir string) string {
 	return ""
 }
 
-// installClaude runs the official installer with HOME pointed at dataDir.
-func installClaude(dataDir string) (string, error) {
+// InstallClaude runs the official installer with HOME pointed at dataDir.
+func InstallClaude(dataDir string) (string, error) {
 	fmt.Println("claude binary not found, installing...")
 
 	cmd := exec.Command("bash", "-c",

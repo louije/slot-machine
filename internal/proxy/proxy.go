@@ -1,8 +1,14 @@
-package main
+// Package proxy is the reverse proxy in front of the live slot.
+//
+// Its whole job is that the app's public port is owned by the daemon rather than
+// by any particular app process, so a deploy can swap what is behind it without
+// the port ever going away.
+package proxy
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -11,7 +17,8 @@ import (
 	"time"
 )
 
-type dynamicProxy struct {
+// Dynamic routes a fixed public address to whichever port is currently live.
+type Dynamic struct {
 	mu        sync.RWMutex
 	port      int
 	addr      string
@@ -27,8 +34,10 @@ type dynamicProxy struct {
 // outage that needs a human.
 const listenRetryWindow = 3 * time.Second
 
-func newDynamicProxy(addr string, intercept http.Handler) *dynamicProxy {
-	p := &dynamicProxy{addr: addr, intercept: intercept}
+// New returns a proxy bound to addr once a target is set. Requests for the
+// agent's own paths go to intercept instead of being forwarded.
+func New(addr string, intercept http.Handler) *Dynamic {
+	p := &Dynamic{addr: addr, intercept: intercept}
 
 	// One ReverseProxy for the lifetime of the daemon rather than one per
 	// request. A per-request proxy gets a fresh Transport, so nothing is ever
@@ -45,14 +54,14 @@ func newDynamicProxy(addr string, intercept http.Handler) *dynamicProxy {
 		// Streaming responses (SSE, long polls) must not sit in a buffer.
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			logf("proxy: %s %s: %v", r.Method, r.URL.Path, err)
+			log.Printf("proxy: %s %s: %v", r.Method, r.URL.Path, err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
 	}
 	return p
 }
 
-func (p *dynamicProxy) setTarget(port int) {
+func (p *Dynamic) SetTarget(port int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.port = port
@@ -65,16 +74,16 @@ func (p *dynamicProxy) setTarget(port int) {
 		// Silently returning here left the daemon reporting itself healthy with
 		// nothing listening on the public port, and no way to find out why.
 		p.listenErr = err
-		logf("proxy: cannot listen on %s: %v", p.addr, err)
+		log.Printf("proxy: cannot listen on %s: %v", p.addr, err)
 		return
 	}
 	p.listenErr = nil
 
-	p.srv = &http.Server{Handler: http.HandlerFunc(p.serveHTTP)}
+	p.srv = &http.Server{Handler: http.HandlerFunc(p.ServeHTTP)}
 	go p.srv.Serve(ln)
 }
 
-func (p *dynamicProxy) listen() (net.Listener, error) {
+func (p *Dynamic) listen() (net.Listener, error) {
 	deadline := time.Now().Add(listenRetryWindow)
 	for {
 		ln, err := net.Listen("tcp", p.addr)
@@ -99,13 +108,13 @@ func (p *dynamicProxy) listen() (net.Listener, error) {
 //
 // serveHTTP already answers 503 whenever there is no target, so this is also
 // less code doing more.
-func (p *dynamicProxy) clearTarget() {
+func (p *Dynamic) ClearTarget() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.port = 0
 }
 
-func (p *dynamicProxy) shutdown() {
+func (p *Dynamic) Shutdown() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.port = 0
@@ -117,13 +126,13 @@ func (p *dynamicProxy) shutdown() {
 
 // listening reports whether the public port is actually bound, so /status can
 // tell the truth about it.
-func (p *dynamicProxy) listening() bool {
+func (p *Dynamic) Listening() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.addr == "" || p.srv != nil
 }
 
-func (p *dynamicProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
+func (p *Dynamic) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Intercept /agent/* and /chat — handled by slot-machine, not forwarded.
 	if p.intercept != nil && (strings.HasPrefix(r.URL.Path, "/agent/") || r.URL.Path == "/chat" || strings.HasPrefix(r.URL.Path, "/chat/") || r.URL.Path == "/chat.css") {
 		p.intercept.ServeHTTP(w, r)

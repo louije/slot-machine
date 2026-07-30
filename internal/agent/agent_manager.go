@@ -1,10 +1,11 @@
-package main
+package agent
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,11 +13,16 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"slot-machine/internal/agent/store"
+	"slot-machine/internal/config"
 )
 
-// agentWork describes one turn to run. The manager owns argv construction so
-// that session resolution (below) can change it without the caller's help.
-type agentWork struct {
+// turn is one message to run through the agent.
+//
+// The manager builds the argv rather than the caller, so that session resolution
+// can decide between --resume and a fresh session without the caller's help.
+type turn struct {
 	convID       string
 	prompt       string
 	sessionID    string
@@ -37,11 +43,13 @@ type runningAgent struct {
 	done   chan struct{}
 }
 
-type agentManager struct {
-	store *agentStore
+// Manager owns every agent subprocess. One runs at a time: they all share a
+// single worktree, so two concurrent agents would edit the same files.
+type Manager struct {
+	db *store.Store
 
 	mu      sync.Mutex
-	queue   []agentWork
+	queue   []turn
 	current *runningAgent // nil when idle; at most one agent runs at a time
 	notify  chan struct{} // closed and replaced on every event, for SSE wakeups
 
@@ -58,9 +66,10 @@ const (
 	stderrTailBytes = 10_000
 )
 
-func newAgentManager(store *agentStore) *agentManager {
-	m := &agentManager{
-		store:  store,
+// NewManager starts the manager's scheduling loop.
+func NewManager(st *store.Store) *Manager {
+	m := &Manager{
+		db:     st,
 		notify: make(chan struct{}),
 		wake:   make(chan struct{}, 1),
 		stopCh: make(chan struct{}),
@@ -79,13 +88,13 @@ func newAgentManager(store *agentStore) *agentManager {
 // but without the goroutines and without the up-to-500ms latency.
 // ---------------------------------------------------------------------------
 
-func (m *agentManager) events() <-chan struct{} {
+func (m *Manager) events() <-chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.notify
 }
 
-func (m *agentManager) broadcast() {
+func (m *Manager) broadcast() {
 	m.mu.Lock()
 	close(m.notify)
 	m.notify = make(chan struct{})
@@ -103,37 +112,37 @@ func (m *agentManager) broadcast() {
 //
 // Returns an error only if the same conversation is already queued or running;
 // a busy *other* conversation is not an error, it is a queue.
-func (m *agentManager) enqueue(work agentWork) error {
+func (m *Manager) enqueue(t turn) error {
 	m.mu.Lock()
-	if m.current != nil && m.current.convID == work.convID {
+	if m.current != nil && m.current.convID == t.convID {
 		m.mu.Unlock()
 		return fmt.Errorf("agent already running for this conversation")
 	}
 	for _, q := range m.queue {
-		if q.convID == work.convID {
+		if q.convID == t.convID {
 			m.mu.Unlock()
 			return fmt.Errorf("a message is already queued for this conversation")
 		}
 	}
-	m.queue = append(m.queue, work)
+	m.queue = append(m.queue, t)
 	m.mu.Unlock()
 
-	if err := m.store.setConversationStatus(work.convID, "queued"); err != nil {
-		logf("store: setting queued status for %s: %v", work.convID, err)
+	if err := m.db.SetConversationStatus(t.convID, "queued"); err != nil {
+		log.Printf("store: setting queued status for %s: %v", t.convID, err)
 	}
 	m.broadcast()
 	m.poke()
 	return nil
 }
 
-func (m *agentManager) poke() {
+func (m *Manager) poke() {
 	select {
 	case m.wake <- struct{}{}:
 	default:
 	}
 }
 
-func (m *agentManager) loop() {
+func (m *Manager) loop() {
 	defer m.wg.Done()
 	for {
 		select {
@@ -149,17 +158,17 @@ func (m *agentManager) loop() {
 }
 
 // drain starts the next queued turn if the agent slot is free.
-func (m *agentManager) drain() {
+func (m *Manager) drain() {
 	m.mu.Lock()
 	if m.current != nil || len(m.queue) == 0 {
 		m.mu.Unlock()
 		return
 	}
-	work := m.queue[0]
+	t := m.queue[0]
 	m.queue = m.queue[1:]
 
-	ctx, cancel := context.WithTimeout(context.Background(), work.timeout)
-	ra := &runningAgent{convID: work.convID, cancel: cancel, done: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), t.timeout)
+	ra := &runningAgent{convID: t.convID, cancel: cancel, done: make(chan struct{})}
 	m.current = ra
 	m.mu.Unlock()
 
@@ -167,7 +176,7 @@ func (m *agentManager) drain() {
 	go func() {
 		defer m.wg.Done()
 		defer cancel()
-		m.runAgent(ctx, work, ra)
+		m.runAgent(ctx, t, ra)
 
 		m.mu.Lock()
 		m.current = nil
@@ -178,7 +187,8 @@ func (m *agentManager) drain() {
 	}()
 }
 
-func (m *agentManager) stop() {
+// Stop cancels the running turn, drops the queue and waits for the loop to exit.
+func (m *Manager) Stop() {
 	close(m.stopCh)
 	m.mu.Lock()
 	if m.current != nil {
@@ -190,7 +200,7 @@ func (m *agentManager) stop() {
 }
 
 // activeConv reports the conversation currently holding the agent slot.
-func (m *agentManager) activeConv() string {
+func (m *Manager) activeConv() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.current == nil {
@@ -201,7 +211,7 @@ func (m *agentManager) activeConv() string {
 
 // isPending reports whether a conversation is running or waiting in the queue,
 // which is what tells an SSE handler to keep the stream open.
-func (m *agentManager) isPending(convID string) bool {
+func (m *Manager) isPending(convID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.current != nil && m.current.convID == convID {
@@ -215,7 +225,7 @@ func (m *agentManager) isPending(convID string) bool {
 	return false
 }
 
-func (m *agentManager) cancel(convID string) error {
+func (m *Manager) cancel(convID string) error {
 	m.mu.Lock()
 	// Cancelling something still in the queue just removes it.
 	for i, q := range m.queue {
@@ -256,31 +266,31 @@ func sessionFilePath(home, workDir, sessionID string) string {
 // resolveResume decides whether --resume can be used. A stale session id fails
 // opaquely inside the CLI and bricks the rest of the conversation, so verify the
 // transcript is actually on disk first and fall back to a fresh session if not.
-func (m *agentManager) resolveResume(work agentWork) bool {
-	if work.sessionID == "" {
+func (m *Manager) resolveResume(t turn) bool {
+	if t.sessionID == "" {
 		return false
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
 	}
-	if _, err := os.Stat(sessionFilePath(home, work.dir, work.sessionID)); err == nil {
+	if _, err := os.Stat(sessionFilePath(home, t.dir, t.sessionID)); err == nil {
 		return true
 	}
 
-	logf("agent: resume target %s missing on disk, starting fresh (%s)", work.sessionID, work.convID)
-	if err := m.store.clearSessionID(work.convID); err != nil {
-		logf("store: clearing session id for %s: %v", work.convID, err)
+	log.Printf("agent: resume target %s missing on disk, starting fresh (%s)", t.sessionID, t.convID)
+	if err := m.db.ClearSessionID(t.convID); err != nil {
+		log.Printf("store: clearing session id for %s: %v", t.convID, err)
 	}
-	m.storeAndBroadcast(work.convID, "system", jsonContent(
+	m.storeAndBroadcast(t.convID, "system", jsonContent(
 		"Previous session transcript is gone; starting a fresh session. Earlier context is not available to the agent."))
 	return false
 }
 
-func buildAgentArgs(work agentWork, resume bool) []string {
-	tools := work.allowedTools
+func buildAgentArgs(t turn, resume bool) []string {
+	tools := t.allowedTools
 	if len(tools) == 0 {
-		tools = defaultAllowedTools
+		tools = config.DefaultAllowedTools
 	}
 
 	args := []string{"--output-format", "stream-json", "--verbose"}
@@ -288,8 +298,8 @@ func buildAgentArgs(work agentWork, resume bool) []string {
 	// Always explicit. Left unset, every run silently inherits whatever the
 	// server user's ~/.claude/settings.json happens to say, which is not
 	// something a deploy tool should ride on.
-	if work.model != "" {
-		args = append(args, "--model", work.model)
+	if t.model != "" {
+		args = append(args, "--model", t.model)
 	}
 
 	args = append(args, "--allowed-tools", strings.Join(tools, ","))
@@ -297,21 +307,21 @@ func buildAgentArgs(work agentWork, resume bool) []string {
 	// Tool policy from outside the agent's worktree. --settings only ever adds
 	// to the project settings, so `deny` is the only direction that restricts —
 	// which is exactly what this file carries.
-	if work.settingsPath != "" {
-		args = append(args, "--settings", work.settingsPath)
+	if t.settingsPath != "" {
+		args = append(args, "--settings", t.settingsPath)
 	}
 
 	// Append rather than replace: --system-prompt discards the CLI's own tool
 	// guidance, which is not ours to throw away. We are adding context, not
 	// substituting for it.
-	args = append(args, "--append-system-prompt", work.systemPrompt)
+	args = append(args, "--append-system-prompt", t.systemPrompt)
 
 	if resume {
-		args = append(args, "--resume", work.sessionID)
+		args = append(args, "--resume", t.sessionID)
 	}
 
 	// "--" so a message beginning with "-" is not parsed as a flag.
-	args = append(args, "-p", "--", work.prompt)
+	args = append(args, "-p", "--", t.prompt)
 	return args
 }
 
@@ -319,14 +329,14 @@ func buildAgentArgs(work agentWork, resume bool) []string {
 // Run
 // ---------------------------------------------------------------------------
 
-func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *runningAgent) {
-	resume := m.resolveResume(work)
-	args := buildAgentArgs(work, resume)
+func (m *Manager) runAgent(ctx context.Context, t turn, ra *runningAgent) {
+	resume := m.resolveResume(t)
+	args := buildAgentArgs(t, resume)
 
-	cmd := exec.CommandContext(ctx, work.bin, args...)
-	cmd.Dir = work.dir
-	if work.env != nil {
-		cmd.Env = work.env
+	cmd := exec.CommandContext(ctx, t.bin, args...)
+	cmd.Dir = t.dir
+	if t.env != nil {
+		cmd.Env = t.env
 	}
 	// The CLI spawns children (shells, tools); signal the whole group so a
 	// cancel does not leave orphans holding the worktree.
@@ -336,7 +346,7 @@ func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *running
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		m.failRun(work.convID, fmt.Sprintf("Could not start the agent: %v", err))
+		m.failRun(t.convID, fmt.Sprintf("Could not start the agent: %v", err))
 		return
 	}
 	// stderr must be drained, not discarded: it is where the CLI explains auth
@@ -351,13 +361,13 @@ func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *running
 	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
-		m.failRun(work.convID, fmt.Sprintf("Could not start the agent: %v", err))
+		m.failRun(t.convID, fmt.Sprintf("Could not start the agent: %v", err))
 		return
 	}
 
-	m.setStatus(work.convID, "running")
-	if err := m.store.setConversationPID(work.convID, cmd.Process.Pid); err != nil {
-		logf("store: recording pid for %s: %v", work.convID, err)
+	m.setStatus(t.convID, "running")
+	if err := m.db.SetConversationPID(t.convID, cmd.Process.Pid); err != nil {
+		log.Printf("store: recording pid for %s: %v", t.convID, err)
 	}
 	m.broadcast()
 
@@ -365,7 +375,7 @@ func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *running
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 	for scanner.Scan() {
-		if text := m.processLine(work.convID, scanner.Text()); text != "" {
+		if text := m.processLine(t.convID, scanner.Text()); text != "" {
 			lastText = text
 		}
 	}
@@ -373,25 +383,25 @@ func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *running
 	waitErr := cmd.Wait()
 	stderrTail := stderr.String()
 
-	if err := m.store.setConversationPID(work.convID, 0); err != nil {
-		logf("store: clearing pid for %s: %v", work.convID, err)
+	if err := m.db.SetConversationPID(t.convID, 0); err != nil {
+		log.Printf("store: clearing pid for %s: %v", t.convID, err)
 	}
 
 	if waitErr == nil {
-		m.setStatus(work.convID, "idle")
+		m.setStatus(t.convID, "idle")
 		return
 	}
 
 	// Timeout is not an API failure; report it as itself.
 	if ctx.Err() == context.DeadlineExceeded {
-		m.failRun(work.convID, fmt.Sprintf(
+		m.failRun(t.convID, fmt.Sprintf(
 			"The agent ran longer than %s and was stopped. Send a new message to continue.",
-			work.timeout))
+			t.timeout))
 		return
 	}
 	if ctx.Err() == context.Canceled {
-		m.setStatus(work.convID, "cancelled")
-		m.storeAndBroadcast(work.convID, "system", jsonContent("Cancelled."))
+		m.storeAndBroadcast(t.convID, "system", jsonContent("Cancelled."))
+		m.setStatus(t.convID, "cancelled")
 		return
 	}
 
@@ -399,19 +409,19 @@ func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *running
 	switch classifyFailure(diagnostic) {
 	case failureTerminal:
 		// Retrying cannot help. Say what a human has to do about it.
-		m.failRun(work.convID, "The agent could not run: "+terminalReason(diagnostic)+
+		m.failRun(t.convID, "The agent could not run: "+terminalReason(diagnostic)+
 			".\n\nThis will keep failing until it is resolved — retrying will not help.")
 
 	case failureTransient:
-		if work.attempt+1 < maxAttempts {
-			delay := time.Duration(work.attempt+1) * 4 * time.Second
-			m.storeAndBroadcast(work.convID, "system", jsonContent(fmt.Sprintf(
+		if t.attempt+1 < maxAttempts {
+			delay := time.Duration(t.attempt+1) * 4 * time.Second
+			m.storeAndBroadcast(t.convID, "system", jsonContent(fmt.Sprintf(
 				"Claude's API is busy. Retrying in %s (attempt %d of %d).",
-				delay, work.attempt+2, maxAttempts)))
-			m.requeueAfter(work, delay)
+				delay, t.attempt+2, maxAttempts)))
+			m.requeueAfter(t, delay)
 			return
 		}
-		m.failRun(work.convID, fmt.Sprintf(
+		m.failRun(t.convID, fmt.Sprintf(
 			"Claude's API stayed busy after %d attempts. Send a new message to try again.", maxAttempts))
 
 	default:
@@ -419,15 +429,15 @@ func (m *agentManager) runAgent(ctx context.Context, work agentWork, ra *running
 		if stderrTail != "" {
 			msg += "\n\n```\n" + stderrTail + "\n```"
 		}
-		m.failRun(work.convID, msg)
+		m.failRun(t.convID, msg)
 	}
 }
 
 // requeueAfter puts a transiently-failed turn back on the queue. The
 // conversation stays in "queued" so the chat keeps streaming across the gap.
-func (m *agentManager) requeueAfter(work agentWork, delay time.Duration) {
-	work.attempt++
-	m.setStatus(work.convID, "queued")
+func (m *Manager) requeueAfter(t turn, delay time.Duration) {
+	t.attempt++
+	m.setStatus(t.convID, "queued")
 	m.broadcast()
 
 	m.wg.Add(1)
@@ -439,20 +449,29 @@ func (m *agentManager) requeueAfter(work agentWork, delay time.Duration) {
 			return
 		}
 		m.mu.Lock()
-		m.queue = append(m.queue, work)
+		m.queue = append(m.queue, t)
 		m.mu.Unlock()
 		m.poke()
 	}()
 }
 
-func (m *agentManager) failRun(convID, message string) {
-	m.setStatus(convID, "error")
+// failRun records why a turn failed and then marks it failed.
+//
+// The order matters and is not interchangeable. A terminal status is what tells
+// every consumer to stop reading: the SSE handler emits the status event and
+// closes the stream, and the chat UI stops listening. Flipping the status first
+// leaves a window in which a client can observe "error" while the explanation is
+// still unwritten — and then it is never delivered, so the user sees a failure
+// with no reason. Writing the message first makes the invariant simple: if you
+// can see a terminal status, the explanation is already there.
+func (m *Manager) failRun(convID, message string) {
 	m.storeAndBroadcast(convID, "system", jsonContent(message))
+	m.setStatus(convID, "error")
 }
 
-func (m *agentManager) setStatus(convID, status string) {
-	if err := m.store.setConversationStatus(convID, status); err != nil {
-		logf("store: setting status %q for %s: %v", status, convID, err)
+func (m *Manager) setStatus(convID, status string) {
+	if err := m.db.SetConversationStatus(convID, status); err != nil {
+		log.Printf("store: setting status %q for %s: %v", status, convID, err)
 	}
 }
 
@@ -494,19 +513,20 @@ func jsonContent(s string) string {
 // "running" belong to a previous daemon; if their process outlived us it is
 // still holding the worktree and can still commit and deploy, so kill it rather
 // than just relabelling the row.
-func (m *agentManager) reapOrphans() (int, error) {
-	rows, err := m.store.unfinishedConversations()
+// ReapOrphans reconciles the database with reality at startup.
+func (m *Manager) ReapOrphans() (int, error) {
+	rows, err := m.db.UnfinishedConversations()
 	if err != nil {
 		return 0, err
 	}
 	for _, c := range rows {
 		if c.PID > 0 && processAlive(c.PID) {
-			logf("agent: killing orphaned agent for %s (pid %d)", c.ID, c.PID)
+			log.Printf("agent: killing orphaned agent for %s (pid %d)", c.ID, c.PID)
 			syscall.Kill(-c.PID, syscall.SIGTERM)
 		}
 		m.setStatus(c.ID, "interrupted")
-		if err := m.store.setConversationPID(c.ID, 0); err != nil {
-			logf("store: clearing pid for %s: %v", c.ID, err)
+		if err := m.db.SetConversationPID(c.ID, 0); err != nil {
+			log.Printf("store: clearing pid for %s: %v", c.ID, err)
 		}
 		m.storeAndBroadcast(c.ID, "system", jsonContent(
 			"The agent was interrupted: slot-machine restarted while it was working. "+
@@ -529,7 +549,7 @@ func processAlive(pid int) bool {
 
 // processLine converts one stream-json line into stored events. It returns any
 // assistant text seen, which feeds failure classification.
-func (m *agentManager) processLine(convID, line string) string {
+func (m *Manager) processLine(convID, line string) string {
 	var raw map[string]any
 	if json.Unmarshal([]byte(line), &raw) != nil {
 		return ""
@@ -541,8 +561,8 @@ func (m *agentManager) processLine(convID, line string) string {
 	case "system":
 		if sub, _ := raw["subtype"].(string); sub == "init" {
 			if sid, ok := raw["session_id"].(string); ok {
-				if err := m.store.updateSessionID(convID, sid); err != nil {
-					logf("store: recording session id for %s: %v", convID, err)
+				if err := m.db.UpdateSessionID(convID, sid); err != nil {
+					log.Printf("store: recording session id for %s: %v", convID, err)
 				}
 			}
 		}
@@ -570,8 +590,8 @@ func (m *agentManager) processLine(convID, line string) string {
 		}
 
 		if match := titlePattern.FindStringSubmatch(text); match != nil {
-			if err := m.store.updateTitle(convID, strings.TrimSpace(match[1])); err != nil {
-				logf("store: updating title for %s: %v", convID, err)
+			if err := m.db.UpdateTitle(convID, strings.TrimSpace(match[1])); err != nil {
+				log.Printf("store: updating title for %s: %v", convID, err)
 			}
 			text = strings.TrimSpace(titlePattern.ReplaceAllString(text, ""))
 		}
@@ -599,15 +619,15 @@ func (m *agentManager) processLine(convID, line string) string {
 			cacheRead, _ = usage["cache_read_input_tokens"].(float64)
 			cacheWrite, _ = usage["cache_creation_input_tokens"].(float64)
 		}
-		if err := m.store.addUsage(convID, int(inputTok), int(outputTok), int(cacheRead), int(cacheWrite)); err != nil {
-			logf("store: recording usage for %s: %v", convID, err)
+		if err := m.db.AddUsage(convID, int(inputTok), int(outputTok), int(cacheRead), int(cacheWrite)); err != nil {
+			log.Printf("store: recording usage for %s: %v", convID, err)
 		}
 
 		resultText, _ := raw["result"].(string)
 		if resultText != "" {
 			if match := titlePattern.FindStringSubmatch(resultText); match != nil {
-				if err := m.store.updateTitle(convID, strings.TrimSpace(match[1])); err != nil {
-					logf("store: updating title for %s: %v", convID, err)
+				if err := m.db.UpdateTitle(convID, strings.TrimSpace(match[1])); err != nil {
+					log.Printf("store: updating title for %s: %v", convID, err)
 				}
 			}
 		}
@@ -633,11 +653,11 @@ func messageBlocks(raw map[string]any) []map[string]any {
 	return blocks
 }
 
-func (m *agentManager) storeAndBroadcast(convID, msgType, content string) {
-	if _, err := m.store.addMessage(convID, msgType, content); err != nil {
+func (m *Manager) storeAndBroadcast(convID, msgType, content string) {
+	if _, err := m.db.AddMessage(convID, msgType, content); err != nil {
 		// This is the failure the store's pragma fix exists to prevent. If it
 		// happens anyway the event is lost, so it must not be lost silently.
-		logf("store: dropping %s event for %s: %v", msgType, convID, err)
+		log.Printf("store: dropping %s event for %s: %v", msgType, convID, err)
 	}
 	m.broadcast()
 }

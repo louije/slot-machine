@@ -1,4 +1,10 @@
-package main
+// Package store persists agent conversations and their events.
+//
+// Events are written here before they are streamed anywhere. That ordering is
+// the point: a browser that disconnects mid-turn loses nothing, because the
+// transcript is already on disk. It only holds if writes actually succeed, which
+// is why openAgentStore refuses to start when the pragmas did not take.
+package store
 
 import (
 	"database/sql"
@@ -8,11 +14,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type agentStore struct {
+// Store is a handle on the agent database.
+type Store struct {
 	db *sql.DB
 }
 
-type conversationRow struct {
+// Conversation is one chat thread with the agent.
+type Conversation struct {
 	ID           string `json:"id"`
 	Title        string `json:"title"`
 	SessionID    string `json:"session_id,omitempty"`
@@ -27,7 +35,8 @@ type conversationRow struct {
 	PID          int    `json:"pid,omitempty"`
 }
 
-type messageRow struct {
+// Message is a single stored event in a conversation.
+type Message struct {
 	ID             int64  `json:"id"`
 	ConversationID string `json:"conversation_id"`
 	Type           string `json:"type"`
@@ -35,7 +44,7 @@ type messageRow struct {
 	CreatedAt      string `json:"created_at"`
 }
 
-// openAgentStore opens (creating if needed) the agent database.
+// Open opens (creating if needed) the agent database.
 //
 // The pragmas travel in the DSN using modernc.org/sqlite's `_pragma=` syntax,
 // not as PRAGMA statements. Two reasons, both learned the hard way:
@@ -53,7 +62,8 @@ type messageRow struct {
 //
 // verifyPragmas below asserts they took effect, so this cannot regress into
 // silence again.
-func openAgentStore(path string) (*agentStore, error) {
+// Open opens (creating if needed) the agent database at path.
+func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite",
 		path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -107,7 +117,7 @@ func openAgentStore(path string) (*agentStore, error) {
 		db.Exec(m)
 	}
 
-	return &agentStore{db: db}, nil
+	return &Store{db: db}, nil
 }
 
 // verifyPragmas fails startup if the DSN pragmas did not take effect. The bug
@@ -132,9 +142,9 @@ func verifyPragmas(db *sql.DB) error {
 	return nil
 }
 
-func (s *agentStore) close() error { return s.db.Close() }
+func (s *Store) Close() error { return s.db.Close() }
 
-func (s *agentStore) createConversation(id, user string) (*conversationRow, error) {
+func (s *Store) CreateConversation(id, user string) (*Conversation, error) {
 	now := time.Now().Format(time.RFC3339)
 	_, err := s.db.Exec(
 		`INSERT INTO conversations (id, user, created_at, updated_at) VALUES (?, ?, ?, ?)`,
@@ -143,7 +153,7 @@ func (s *agentStore) createConversation(id, user string) (*conversationRow, erro
 	if err != nil {
 		return nil, err
 	}
-	return &conversationRow{ID: id, User: user, CreatedAt: now, UpdatedAt: now, Status: "idle"}, nil
+	return &Conversation{ID: id, User: user, CreatedAt: now, UpdatedAt: now, Status: "idle"}, nil
 }
 
 const conversationColumns = `id, title, session_id, user, input_tokens, output_tokens,
@@ -151,15 +161,15 @@ const conversationColumns = `id, title, session_id, user, input_tokens, output_t
 
 type scanner interface{ Scan(...any) error }
 
-func scanConversation(sc scanner) (conversationRow, error) {
-	var c conversationRow
+func scanConversation(sc scanner) (Conversation, error) {
+	var c Conversation
 	err := sc.Scan(&c.ID, &c.Title, &c.SessionID, &c.User,
 		&c.InputTokens, &c.OutputTokens, &c.CacheRead, &c.CacheWrite,
 		&c.CreatedAt, &c.UpdatedAt, &c.Status, &c.PID)
 	return c, err
 }
 
-func (s *agentStore) getConversation(id string) (*conversationRow, error) {
+func (s *Store) GetConversation(id string) (*Conversation, error) {
 	row := s.db.QueryRow(
 		`SELECT `+conversationColumns+` FROM conversations WHERE id = ?`, id)
 	c, err := scanConversation(row)
@@ -172,14 +182,14 @@ func (s *agentStore) getConversation(id string) (*conversationRow, error) {
 	return &c, nil
 }
 
-func (s *agentStore) queryConversations(where string) ([]conversationRow, error) {
+func (s *Store) queryConversations(where string) ([]Conversation, error) {
 	rows, err := s.db.Query(`SELECT ` + conversationColumns + ` FROM conversations ` + where)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var list []conversationRow
+	var list []Conversation
 	for rows.Next() {
 		c, err := scanConversation(rows)
 		if err != nil {
@@ -190,24 +200,24 @@ func (s *agentStore) queryConversations(where string) ([]conversationRow, error)
 	return list, rows.Err()
 }
 
-func (s *agentStore) listConversations() ([]conversationRow, error) {
+func (s *Store) ListConversations() ([]Conversation, error) {
 	return s.queryConversations(`ORDER BY updated_at DESC`)
 }
 
 // queuedConversations returns conversations waiting for the agent slot, oldest
 // first — the drain order is arrival order.
-func (s *agentStore) queuedConversations() ([]conversationRow, error) {
+func (s *Store) QueuedConversations() ([]Conversation, error) {
 	return s.queryConversations(`WHERE status = 'queued' ORDER BY updated_at ASC`)
 }
 
 // unfinishedConversations returns rows the database believes are queued or
 // mid-run. After a daemon restart these are stale by definition, since the
 // manager's in-memory map starts empty.
-func (s *agentStore) unfinishedConversations() ([]conversationRow, error) {
+func (s *Store) UnfinishedConversations() ([]Conversation, error) {
 	return s.queryConversations(`WHERE status IN ('running', 'queued')`)
 }
 
-func (s *agentStore) addMessage(conversationID, msgType, content string) (int64, error) {
+func (s *Store) AddMessage(conversationID, msgType, content string) (int64, error) {
 	now := time.Now().Format(time.RFC3339)
 	res, err := s.db.Exec(
 		`INSERT INTO messages (conversation_id, type, content, created_at) VALUES (?, ?, ?, ?)`,
@@ -223,7 +233,7 @@ func (s *agentStore) addMessage(conversationID, msgType, content string) (int64,
 	return res.LastInsertId()
 }
 
-func (s *agentStore) getMessages(conversationID string, afterID int64) ([]messageRow, error) {
+func (s *Store) GetMessages(conversationID string, afterID int64) ([]Message, error) {
 	rows, err := s.db.Query(
 		`SELECT id, conversation_id, type, content, created_at
 		 FROM messages WHERE conversation_id = ? AND id > ? ORDER BY id`,
@@ -234,9 +244,9 @@ func (s *agentStore) getMessages(conversationID string, afterID int64) ([]messag
 	}
 	defer rows.Close()
 
-	var list []messageRow
+	var list []Message
 	for rows.Next() {
-		var m messageRow
+		var m Message
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Type, &m.Content, &m.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -245,7 +255,7 @@ func (s *agentStore) getMessages(conversationID string, afterID int64) ([]messag
 	return list, rows.Err()
 }
 
-func (s *agentStore) deleteConversation(id string) error {
+func (s *Store) DeleteConversation(id string) error {
 	if _, err := s.db.Exec(`DELETE FROM messages WHERE conversation_id = ?`, id); err != nil {
 		return err
 	}
@@ -253,24 +263,24 @@ func (s *agentStore) deleteConversation(id string) error {
 	return err
 }
 
-func (s *agentStore) updateSessionID(id, sessionID string) error {
+func (s *Store) UpdateSessionID(id, sessionID string) error {
 	_, err := s.db.Exec(`UPDATE conversations SET session_id = ? WHERE id = ?`, sessionID, id)
 	return err
 }
 
 // clearSessionID drops a resume target that no longer exists on disk, so the
 // next turn starts a fresh session instead of failing opaquely.
-func (s *agentStore) clearSessionID(id string) error {
+func (s *Store) ClearSessionID(id string) error {
 	_, err := s.db.Exec(`UPDATE conversations SET session_id = '' WHERE id = ?`, id)
 	return err
 }
 
-func (s *agentStore) updateTitle(id, title string) error {
+func (s *Store) UpdateTitle(id, title string) error {
 	_, err := s.db.Exec(`UPDATE conversations SET title = ? WHERE id = ?`, title, id)
 	return err
 }
 
-func (s *agentStore) addUsage(id string, input, output, cacheRead, cacheWrite int) error {
+func (s *Store) AddUsage(id string, input, output, cacheRead, cacheWrite int) error {
 	_, err := s.db.Exec(
 		`UPDATE conversations SET
 			input_tokens = input_tokens + ?,
@@ -283,7 +293,7 @@ func (s *agentStore) addUsage(id string, input, output, cacheRead, cacheWrite in
 	return err
 }
 
-func (s *agentStore) setConversationStatus(id, status string) error {
+func (s *Store) SetConversationStatus(id, status string) error {
 	_, err := s.db.Exec(
 		`UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?`,
 		status, time.Now().Format(time.RFC3339), id,
@@ -293,7 +303,7 @@ func (s *agentStore) setConversationStatus(id, status string) error {
 
 // setConversationPID records the OS pid of the running agent so a restarted
 // daemon can tell a genuinely-dead session from one whose process outlived it.
-func (s *agentStore) setConversationPID(id string, pid int) error {
+func (s *Store) SetConversationPID(id string, pid int) error {
 	_, err := s.db.Exec(`UPDATE conversations SET pid = ? WHERE id = ?`, pid, id)
 	return err
 }

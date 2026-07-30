@@ -1,7 +1,8 @@
-package main
+package orchestrator
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,16 +23,19 @@ import (
 // convention means code that reasons about deploy slots cannot pick it up by
 // accident.
 const (
-	stagingSlotName = "slot-staging"
-	machineSlotName = "machine"
+	// StagingSlotName is where a deploy is prepared and probed.
+	StagingSlotName = "slot-staging"
+	// MachineSlotName is the agent's worktree. It deliberately lacks the slot-
+	// prefix: it is not a deploy slot and must never be treated as one.
+	MachineSlotName = "machine"
 )
 
-func (o *orchestrator) stagingDir() string {
-	return filepath.Join(o.dataDir, stagingSlotName)
+func (o *Orchestrator) stagingDir() string {
+	return filepath.Join(o.dataDir, StagingSlotName)
 }
 
-func (o *orchestrator) machineDir() string {
-	return filepath.Join(o.dataDir, machineSlotName)
+func (o *Orchestrator) MachineDir() string {
+	return filepath.Join(o.dataDir, MachineSlotName)
 }
 
 // ---------------------------------------------------------------------------
@@ -47,8 +51,8 @@ func (o *orchestrator) machineDir() string {
 // `git gc` away from gone. On a real branch the commits have a ref, and the
 // design's branch model (docs/design.md §4) becomes implementable — you cannot
 // merge main into a detached HEAD and expect it to mean anything.
-func (o *orchestrator) ensureMachineSlot() error {
-	dir := o.machineDir()
+func (o *Orchestrator) EnsureMachineSlot() error {
+	dir := o.MachineDir()
 	branch := o.cfg.MachineBranch
 
 	// Create the branch if this repo has never had one.
@@ -60,7 +64,7 @@ func (o *orchestrator) ensureMachineSlot() error {
 		if _, err := git(o.repoDir, "branch", branch, base); err != nil {
 			return fmt.Errorf("creating %s branch: %w", branch, err)
 		}
-		logf("created branch %s from %s", branch, base)
+		log.Printf("created branch %s from %s", branch, base)
 	}
 
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
@@ -90,10 +94,10 @@ func (o *orchestrator) ensureMachineSlot() error {
 	o.applySharedDirs(dir)
 
 	if o.cfg.SetupCommand != "" {
-		logf("running setup in the machine slot...")
+		log.Printf("running setup in the machine slot...")
 		if err := o.runSetup(dir, 0, 0); err != nil {
 			// Not fatal: the agent has a shell and can fix its own workspace.
-			logf("warning: setup in the machine slot failed: %v", err)
+			log.Printf("warning: setup in the machine slot failed: %v", err)
 		}
 	}
 	return nil
@@ -103,7 +107,7 @@ func (o *orchestrator) ensureMachineSlot() error {
 // Deploy slots
 // ---------------------------------------------------------------------------
 
-func (o *orchestrator) prepareSlot(slotDir, commit string) error {
+func (o *Orchestrator) prepareSlot(slotDir, commit string) error {
 	if _, err := os.Stat(filepath.Join(slotDir, ".git")); err == nil {
 		if _, err := git(slotDir, "checkout", "--force", "--detach", commit); err != nil {
 			return fmt.Errorf("checkout in staging: %w", err)
@@ -122,7 +126,7 @@ func (o *orchestrator) prepareSlot(slotDir, commit string) error {
 
 // promoteStaging renames slot-staging → slot-<hash> and repairs git worktree
 // metadata.
-func (o *orchestrator) promoteStaging(oldDir, newDir string) error {
+func (o *Orchestrator) promoteStaging(oldDir, newDir string) error {
 	if err := os.Rename(oldDir, newDir); err != nil {
 		return err
 	}
@@ -186,7 +190,7 @@ func cloneTree(src, dst string) error {
 }
 
 // createStaging rebuilds slot-staging as a copy of the promoted slot.
-func (o *orchestrator) createStaging(srcDir, commit string) {
+func (o *Orchestrator) createStaging(srcDir, commit string) {
 	dstDir := o.stagingDir()
 
 	if err := cloneTree(srcDir, dstDir); err == nil {
@@ -201,14 +205,14 @@ func (o *orchestrator) createStaging(srcDir, commit string) {
 	// have to rebuild whatever the clone would have carried over.
 	exec.Command("git", "-C", o.repoDir, "worktree", "prune").Run()
 	if _, err := git(o.repoDir, "worktree", "add", "--detach", dstDir, commit); err != nil {
-		logf("warning: could not recreate the staging slot: %v", err)
+		log.Printf("warning: could not recreate the staging slot: %v", err)
 		return
 	}
 	o.applySharedDirs(dstDir)
 }
 
 // fixClonedWorktree sets up git worktree metadata for a cloned directory.
-func (o *orchestrator) fixClonedWorktree(wtDir, commit string) error {
+func (o *Orchestrator) fixClonedWorktree(wtDir, commit string) error {
 	gitFile := filepath.Join(wtDir, ".git")
 	os.Remove(gitFile)
 
@@ -218,7 +222,7 @@ func (o *orchestrator) fixClonedWorktree(wtDir, commit string) error {
 		return fmt.Errorf("repo .git is not a directory")
 	}
 
-	metaDir := filepath.Join(repoGitDir, "worktrees", stagingSlotName)
+	metaDir := filepath.Join(repoGitDir, "worktrees", StagingSlotName)
 
 	os.RemoveAll(metaDir)
 	if err := os.MkdirAll(metaDir, 0755); err != nil {
@@ -245,7 +249,7 @@ func (o *orchestrator) fixClonedWorktree(wtDir, commit string) error {
 // applySharedDirs replaces configured shared_dirs in slotDir with symlinks to
 // the canonical location in the source repo, so every slot — including the
 // machine slot — sees the same live data.
-func (o *orchestrator) applySharedDirs(slotDir string) {
+func (o *Orchestrator) applySharedDirs(slotDir string) {
 	if len(o.cfg.SharedDirs) == 0 {
 		return
 	}
@@ -253,7 +257,7 @@ func (o *orchestrator) applySharedDirs(slotDir string) {
 	for _, name := range o.cfg.SharedDirs {
 		name = filepath.Clean(name)
 		if name == "." || name == ".." || filepath.IsAbs(name) || strings.HasPrefix(name, "../") {
-			logf("warning: ignoring shared_dir %q: must be a relative path inside the repo", name)
+			log.Printf("warning: ignoring shared_dir %q: must be a relative path inside the repo", name)
 			continue
 		}
 
@@ -279,10 +283,10 @@ func (o *orchestrator) applySharedDirs(slotDir string) {
 	}
 }
 
-func (o *orchestrator) removeWorktree(dir string) {
+func (o *Orchestrator) removeWorktree(dir string) {
 	// Guard: the machine slot is not a deploy slot and must never be collected.
-	if filepath.Clean(dir) == filepath.Clean(o.machineDir()) {
-		logf("refusing to remove the machine slot")
+	if filepath.Clean(dir) == filepath.Clean(o.MachineDir()) {
+		log.Printf("refusing to remove the machine slot")
 		return
 	}
 	cmd := exec.Command("git", "-C", o.repoDir, "worktree", "remove", "--force", dir)
@@ -300,7 +304,7 @@ func (o *orchestrator) removeWorktree(dir string) {
 // symlink. The result depends on ordering, which is the worst kind of bug to
 // diagnose. Nothing here can safely fix it — dropping tracked files or ignoring
 // the config would both lose data — so say so clearly at startup instead.
-func (o *orchestrator) warnTrackedSharedDirs() {
+func (o *Orchestrator) WarnTrackedSharedDirs() {
 	for _, name := range o.cfg.SharedDirs {
 		name = filepath.Clean(name)
 		if name == "." || name == ".." || filepath.IsAbs(name) {
@@ -311,7 +315,7 @@ func (o *orchestrator) warnTrackedSharedDirs() {
 			continue
 		}
 		n := len(splitLines(out))
-		logf("warning: shared_dir %q has %d file(s) tracked in git. "+
+		log.Printf("warning: shared_dir %q has %d file(s) tracked in git. "+
 			"Shared dirs are replaced by symlinks in every slot, so a tracked path "+
 			"will fight the checkout. Add %s to .gitignore and `git rm -r --cached %s`.",
 			name, n, name, name)

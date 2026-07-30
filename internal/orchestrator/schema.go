@@ -1,4 +1,4 @@
-package main
+package orchestrator
 
 import (
 	"encoding/json"
@@ -37,7 +37,7 @@ type schemaStatus struct {
 // database's actual version — which is precisely the rollback question ("does
 // this older code still understand the schema we now have?") as well as the
 // deploy one.
-func (o *orchestrator) checkSchemaCompatible(s *slot) error {
+func (o *Orchestrator) checkSchemaCompatible(s *slot) error {
 	if o.cfg.SchemaStatusEndpoint == "" {
 		return nil
 	}

@@ -1,4 +1,4 @@
-package main
+package orchestrator
 
 import (
 	"encoding/json"
@@ -20,7 +20,7 @@ func atomicSymlink(linkPath, target string) error {
 	return os.Rename(tmpLink, linkPath)
 }
 
-func (o *orchestrator) recoverState() {
+func (o *Orchestrator) RecoverState() {
 	// Read live symlink.
 	liveLink := filepath.Join(o.dataDir, "live")
 	target, err := os.Readlink(liveLink)
@@ -57,9 +57,9 @@ func (o *orchestrator) recoverState() {
 	if o.healthCheck(s) {
 		s.name = target
 		o.liveSlot = s
-		o.appProxy.setTarget(appPort)
-		o.intProxy.setTarget(intPort)
-		fmt.Printf("recovered live slot: %s (%s)\n", target, shortHash(commit))
+		o.appProxy.SetTarget(appPort)
+		o.intProxy.SetTarget(intPort)
+		fmt.Printf("recovered live slot: %s (%s)\n", target, ShortHash(commit))
 	} else {
 		syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
 		<-s.done
@@ -88,7 +88,7 @@ func (o *orchestrator) recoverState() {
 	}
 }
 
-func (o *orchestrator) getWorktreeCommit(dir string) string {
+func (o *Orchestrator) getWorktreeCommit(dir string) string {
 	cmd := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
@@ -97,7 +97,7 @@ func (o *orchestrator) getWorktreeCommit(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func (o *orchestrator) appendJournal(action, commit, slotDir, prevCommit string) {
+func (o *Orchestrator) appendJournal(action, commit, slotDir, prevCommit string) {
 	entry := map[string]string{
 		"time":        time.Now().Format(time.RFC3339),
 		"action":      action,

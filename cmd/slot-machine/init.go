@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"slot-machine/internal/config"
 )
 
 func cmdInit() {
@@ -16,7 +18,7 @@ func cmdInit() {
 		os.Exit(1)
 	}
 
-	cfg := config{
+	cfg := config.Config{
 		Port:            3000,
 		InternalPort:    3000,
 		HealthEndpoint:  "/healthz",

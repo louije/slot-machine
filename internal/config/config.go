@@ -1,13 +1,20 @@
-package main
+// Package config defines slot-machine's app contract: what the daemon needs to
+// know about an app in order to run it, and nothing more.
+//
+// Defaults and validation live here rather than at the call sites, because the
+// zero values are not harmless — a health timeout of 0 fails every deploy, and a
+// drain timeout of 0 turns graceful shutdown into an immediate kill.
+package config
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
 
-type config struct {
+type Config struct {
 	SetupCommand    string `json:"setup_command"`
 	StartCommand    string `json:"start_command"`
 	Port            int    `json:"port"`
@@ -45,7 +52,8 @@ type config struct {
 	SchemaStatusEndpoint string `json:"schema_status_endpoint"`
 }
 
-var defaultAllowedTools = []string{"Bash", "Edit", "Read", "Write", "Glob", "Grep"}
+// DefaultAllowedTools is the tool set an agent gets when the config is silent.
+var DefaultAllowedTools = []string{"Bash", "Edit", "Read", "Write", "Glob", "Grep"}
 
 // loadConfig reads, defaults and validates the config in one place.
 //
@@ -54,23 +62,23 @@ var defaultAllowedTools = []string{"Bash", "Edit", "Read", "Write", "Glob", "Gre
 // harmless. health_timeout_ms of 0 makes the health-check deadline expire before
 // the first poll, so every deploy fails; drain_timeout_ms of 0 turns the
 // graceful shutdown window into an immediate SIGKILL.
-func loadConfig(path string) (config, error) {
+func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return config{}, err
+		return Config{}, err
 	}
-	var cfg config
+	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return config{}, fmt.Errorf("parsing %s: %w", path, err)
+		return Config{}, fmt.Errorf("parsing %s: %w", path, err)
 	}
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
-		return config{}, fmt.Errorf("invalid config %s: %w", path, err)
+		return Config{}, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	return cfg, nil
 }
 
-func (c *config) applyDefaults() {
+func (c *Config) applyDefaults() {
 	if c.HealthTimeoutMs == 0 {
 		c.HealthTimeoutMs = 10000
 	}
@@ -87,7 +95,7 @@ func (c *config) applyDefaults() {
 		c.AgentAuth = "hmac"
 	}
 	if len(c.AgentAllowedTools) == 0 {
-		c.AgentAllowedTools = defaultAllowedTools
+		c.AgentAllowedTools = DefaultAllowedTools
 	}
 	if c.AgentTimeoutS == 0 {
 		c.AgentTimeoutS = 1800 // 30 minutes
@@ -109,7 +117,7 @@ func (c *config) applyDefaults() {
 	}
 }
 
-func (c *config) validate() error {
+func (c *Config) validate() error {
 	var problems []string
 
 	if c.StartCommand == "" {
@@ -133,8 +141,10 @@ func (c *config) validate() error {
 		problems = append(problems, fmt.Sprintf(
 			"machine_branch and human_branch are both %q; the agent needs its own branch", c.MachineBranch))
 	}
-	if _, err := compileSecretPatterns(c.SecretPatterns); err != nil {
-		problems = append(problems, err.Error())
+	for _, p := range c.SecretPatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			problems = append(problems, fmt.Sprintf("secret_patterns: %q is not a valid regexp: %v", p, err))
+		}
 	}
 
 	if len(problems) > 0 {

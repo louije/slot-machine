@@ -1,9 +1,10 @@
-package main
+package orchestrator
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -11,10 +12,18 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"slot-machine/internal/config"
+	"slot-machine/internal/proxy"
 )
 
-type orchestrator struct {
-	cfg        config
+// Orchestrator owns the deploy lifecycle for one app: the slots, the processes
+// in them, the health contract, and the proxy in front.
+//
+// It knows nothing about the agent. The agent asks for a deploy by running the
+// same CLI a human would, so there is no privileged internal path to secure.
+type Orchestrator struct {
+	cfg        config.Config
 	repoDir    string
 	dataDir    string
 	authSecret string // hex HMAC secret, passed to the app as SLOT_MACHINE_AUTH_SECRET
@@ -25,15 +34,15 @@ type orchestrator struct {
 	prevSlot   *slot
 	lastDeploy time.Time
 
-	appProxy *dynamicProxy // proxies config.Port → live slot's appPort
-	intProxy *dynamicProxy // proxies config.InternalPort → live slot's intPort
+	appProxy *proxy.Dynamic // proxies config.Port → live slot's appPort
+	intProxy *proxy.Dynamic // proxies config.InternalPort → live slot's intPort
 }
 
 // ---------------------------------------------------------------------------
 // HTTP API
 // ---------------------------------------------------------------------------
 
-func (o *orchestrator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (o *Orchestrator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/":
 		w.Header().Set("Content-Type", "application/json")
@@ -59,7 +68,7 @@ type deployRequest struct {
 	Commit string `json:"commit"`
 }
 
-type deployResponse struct {
+type DeployResponse struct {
 	Success        bool   `json:"success"`
 	Slot           string `json:"slot"`
 	Commit         string `json:"commit"`
@@ -70,20 +79,20 @@ type deployResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-func (o *orchestrator) handleDeploy(w http.ResponseWriter, r *http.Request) {
+func (o *Orchestrator) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	var req deployRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Commit == "" {
-		writeJSON(w, 400, deployResponse{Stage: "resolve", Error: "missing commit"})
+		writeJSON(w, 400, DeployResponse{Stage: "resolve", Error: "missing commit"})
 		return
 	}
 
-	resp, code := o.doDeploy(req.Commit)
+	resp, code := o.Deploy(req.Commit)
 	writeJSON(w, code, resp)
 }
 
 // --- POST /rollback ---
 
-type rollbackResponse struct {
+type RollbackResponse struct {
 	Success bool   `json:"success"`
 	Slot    string `json:"slot"`
 	Commit  string `json:"commit"`
@@ -91,14 +100,14 @@ type rollbackResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
-func (o *orchestrator) handleRollback(w http.ResponseWriter, r *http.Request) {
-	resp, code := o.doRollback()
+func (o *Orchestrator) handleRollback(w http.ResponseWriter, r *http.Request) {
+	resp, code := o.Rollback()
 	writeJSON(w, code, resp)
 }
 
 // --- GET /status ---
 
-type statusResponse struct {
+type StatusResponse struct {
 	LiveSlot       string            `json:"live_slot"`
 	LiveCommit     string            `json:"live_commit"`
 	PreviousSlot   string            `json:"previous_slot"`
@@ -117,23 +126,23 @@ type statusResponse struct {
 	ProxyListening bool `json:"proxy_listening"`
 }
 
-func (o *orchestrator) handleStatus(w http.ResponseWriter, r *http.Request) {
+func (o *Orchestrator) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Read git state before taking the lock: shelling out under o.mu would block
 	// deploys for the duration.
-	machineCommit, _ := git(o.machineDir(), "rev-parse", "HEAD")
+	machineCommit, _ := git(o.MachineDir(), "rev-parse", "HEAD")
 	divergence := o.machineDivergence()
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	resp := statusResponse{
-		StagingDir:     stagingSlotName,
-		MachineDir:     machineSlotName,
+	resp := StatusResponse{
+		StagingDir:     StagingSlotName,
+		MachineDir:     MachineSlotName,
 		MachineBranch:  o.cfg.MachineBranch,
 		MachineCommit:  machineCommit,
 		Divergence:     divergence,
 		Deploying:      o.deploying,
-		ProxyListening: o.appProxy.listening(),
+		ProxyListening: o.appProxy.Listening(),
 	}
 
 	if o.liveSlot != nil {
@@ -168,11 +177,11 @@ func (o *orchestrator) handleStatus(w http.ResponseWriter, r *http.Request) {
 //
 // Every failure path leaves the live slot serving and returns the stage it
 // stopped at, so "deploy failed:" is never followed by an empty string.
-func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
+func (o *Orchestrator) Deploy(commit string) (DeployResponse, int) {
 	o.mu.Lock()
 	if o.deploying {
 		o.mu.Unlock()
-		return deployResponse{Stage: "resolve", Error: "a deploy is already in progress"}, 409
+		return DeployResponse{Stage: "resolve", Error: "a deploy is already in progress"}, 409
 	}
 	o.deploying = true
 	oldLive := o.liveSlot
@@ -189,9 +198,9 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 		o.mu.Unlock()
 	}()
 
-	fail := func(stage, msg string, code int) (deployResponse, int) {
-		logf("deploy %s failed at %s: %s", shortHash(commit), stage, msg)
-		return deployResponse{Stage: stage, Error: msg, PreviousCommit: liveCommit}, code
+	fail := func(stage, msg string, code int) (DeployResponse, int) {
+		log.Printf("deploy %s failed at %s: %s", ShortHash(commit), stage, msg)
+		return DeployResponse{Stage: stage, Error: msg, PreviousCommit: liveCommit}, code
 	}
 
 	// 1. Resolve — reject anything we cannot name before doing work.
@@ -250,7 +259,7 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 		o.kill(newSlot)
 		return fail("probe", fmt.Sprintf(
 			"the new process did not pass %s within %dms (see %s.log); the live slot is untouched",
-			o.cfg.HealthEndpoint, o.cfg.HealthTimeoutMs, stagingSlotName), 422)
+			o.cfg.HealthEndpoint, o.cfg.HealthTimeoutMs, StagingSlotName), 422)
 	}
 	if err := o.checkSchemaCompatible(newSlot); err != nil {
 		o.kill(newSlot)
@@ -258,7 +267,7 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 	}
 
 	// 8. Promote.
-	slotName := fmt.Sprintf("slot-%s", shortHash(commit))
+	slotName := fmt.Sprintf("slot-%s", ShortHash(commit))
 	slotDir := filepath.Join(o.dataDir, slotName)
 
 	// GC the old prev first, so re-deploying the same commit cannot collide.
@@ -278,15 +287,15 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 	}
 	if err := o.promoteStaging(stagingDir, slotDir); err != nil {
 		// Non-fatal: the process is running from stagingDir, so use that path.
-		logf("warning: could not rename the staging slot: %v", err)
+		log.Printf("warning: could not rename the staging slot: %v", err)
 		slotDir = stagingDir
-		slotName = stagingSlotName
+		slotName = StagingSlotName
 	}
 	newSlot.dir = slotDir
 	newSlot.name = slotName
 
-	o.appProxy.setTarget(appPort)
-	o.intProxy.setTarget(intPort)
+	o.appProxy.SetTarget(appPort)
+	o.intProxy.SetTarget(intPort)
 
 	// Update state before draining, so the crash callback cannot clear the proxy
 	// target we just set.
@@ -311,7 +320,7 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 	o.createStaging(slotDir, commit)
 	o.appendJournal("deploy", commit, slotName, liveCommit)
 
-	return deployResponse{
+	return DeployResponse{
 		Success:        true,
 		Slot:           slotName,
 		Commit:         commit,
@@ -319,7 +328,7 @@ func (o *orchestrator) doDeploy(commit string) (deployResponse, int) {
 	}, 200
 }
 
-func (o *orchestrator) kill(s *slot) {
+func (o *Orchestrator) kill(s *slot) {
 	if s == nil || s.cmd == nil || s.cmd.Process == nil {
 		return
 	}
@@ -330,7 +339,7 @@ func (o *orchestrator) kill(s *slot) {
 // runPreDeploy runs the app's own checks in the staging tree. A non-zero exit
 // blocks the promotion — this is the "is it safe to make live" step that a
 // health endpoint alone cannot answer.
-func (o *orchestrator) runPreDeploy(dir string, appPort, intPort int) error {
+func (o *Orchestrator) runPreDeploy(dir string, appPort, intPort int) error {
 	if o.cfg.PreDeployCommand == "" {
 		return nil
 	}
@@ -373,15 +382,15 @@ func tailString(s string, max int) string {
 // traffic. It does run the schema check, because the database may have moved
 // forward since — that is the asymmetry that makes rollback dangerous, and it is
 // the one migration case the orchestrator can actually rule on.
-func (o *orchestrator) doRollback() (rollbackResponse, int) {
+func (o *Orchestrator) Rollback() (RollbackResponse, int) {
 	o.mu.Lock()
 	if o.deploying {
 		o.mu.Unlock()
-		return rollbackResponse{Stage: "resolve", Error: "a deploy is already in progress"}, 409
+		return RollbackResponse{Stage: "resolve", Error: "a deploy is already in progress"}, 409
 	}
 	if o.prevSlot == nil {
 		o.mu.Unlock()
-		return rollbackResponse{Stage: "resolve", Error: "no previous slot to roll back to"}, 400
+		return RollbackResponse{Stage: "resolve", Error: "no previous slot to roll back to"}, 400
 	}
 	o.deploying = true
 	oldLive := o.liveSlot
@@ -394,9 +403,9 @@ func (o *orchestrator) doRollback() (rollbackResponse, int) {
 		o.mu.Unlock()
 	}()
 
-	fail := func(stage, msg string, code int) (rollbackResponse, int) {
-		logf("rollback failed at %s: %s", stage, msg)
-		return rollbackResponse{Stage: stage, Error: msg}, code
+	fail := func(stage, msg string, code int) (RollbackResponse, int) {
+		log.Printf("rollback failed at %s: %s", stage, msg)
+		return RollbackResponse{Stage: stage, Error: msg}, code
 	}
 
 	appPort, err := findFreePort()
@@ -422,8 +431,8 @@ func (o *orchestrator) doRollback() (rollbackResponse, int) {
 		return fail("probe", err.Error(), 422)
 	}
 
-	o.appProxy.setTarget(appPort)
-	o.intProxy.setTarget(intPort)
+	o.appProxy.SetTarget(appPort)
+	o.intProxy.SetTarget(intPort)
 
 	newSlot.name = prev.name
 	o.mu.Lock()
@@ -444,9 +453,65 @@ func (o *orchestrator) doRollback() (rollbackResponse, int) {
 	o.createStaging(prev.dir, prev.commit)
 	o.appendJournal("rollback", prev.commit, prev.name, "")
 
-	return rollbackResponse{
+	return RollbackResponse{
 		Success: true,
 		Slot:    prev.name,
 		Commit:  prev.commit,
 	}, 200
+}
+
+// Options configures an Orchestrator.
+type Options struct {
+	Config config.Config
+	// RepoDir is the git repository the slots are worktrees of.
+	RepoDir string
+	// DataDir holds the slots, the symlinks, and the deploy journal.
+	DataDir string
+	// AuthSecret is passed to app processes as SLOT_MACHINE_AUTH_SECRET. It is
+	// deliberately not passed to the agent.
+	AuthSecret string
+	// Intercept handles the agent's own paths on the public port, so the chat
+	// lives at the app's origin without a second listener. May be nil.
+	Intercept http.Handler
+}
+
+// New wires an Orchestrator and its two proxies. Nothing is started and no slot
+// is touched until RecoverState or Deploy is called.
+func New(opts Options) *Orchestrator {
+	appAddr := ""
+	if opts.Config.Port != 0 {
+		appAddr = fmt.Sprintf(":%d", opts.Config.Port)
+	}
+	// Only bind a second listener when the app really uses a separate internal
+	// port; otherwise the health endpoint rides on the public one.
+	intAddr := ""
+	if opts.Config.InternalPort != 0 && opts.Config.InternalPort != opts.Config.Port {
+		intAddr = fmt.Sprintf(":%d", opts.Config.InternalPort)
+	}
+
+	return &Orchestrator{
+		cfg:        opts.Config,
+		repoDir:    opts.RepoDir,
+		dataDir:    opts.DataDir,
+		authSecret: opts.AuthSecret,
+		appProxy:   proxy.New(appAddr, opts.Intercept),
+		intProxy:   proxy.New(intAddr, nil),
+	}
+}
+
+// Shutdown drains the app processes and releases the public ports.
+func (o *Orchestrator) Shutdown() {
+	o.DrainAll()
+	o.appProxy.Shutdown()
+	o.intProxy.Shutdown()
+}
+
+// LiveCommit reports what is currently serving, or "" if nothing is.
+func (o *Orchestrator) LiveCommit() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.liveSlot == nil {
+		return ""
+	}
+	return o.liveSlot.commit
 }

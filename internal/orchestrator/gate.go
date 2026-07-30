@@ -1,7 +1,8 @@
-package main
+package orchestrator
 
 import (
 	"fmt"
+	"log"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -65,7 +66,7 @@ func (e *gateError) Error() string { return e.Check + ": " + e.Detail }
 // base is the live commit. On a first deploy there is no live commit and
 // nothing about production is being changed, so the diff-based checks are
 // skipped — there is no meaningful "change" to measure.
-func (o *orchestrator) runGate(base, candidate string) error {
+func (o *Orchestrator) runGate(base, candidate string) error {
 	if base == "" {
 		return nil
 	}
@@ -93,7 +94,7 @@ func (o *orchestrator) runGate(base, candidate string) error {
 	return o.checkSilentRevert(candidate)
 }
 
-func (o *orchestrator) checkProtectedPaths(files []string) error {
+func (o *Orchestrator) checkProtectedPaths(files []string) error {
 	for _, f := range files {
 		for _, p := range o.cfg.ProtectedPaths {
 			if pathUnder(f, p) {
@@ -118,7 +119,7 @@ func pathUnder(file, p string) bool {
 	return strings.HasPrefix(file, p+"/")
 }
 
-func (o *orchestrator) checkDiffSize(rng string) error {
+func (o *Orchestrator) checkDiffSize(rng string) error {
 	if o.cfg.MaxDiffLines <= 0 {
 		return nil
 	}
@@ -148,7 +149,7 @@ func (o *orchestrator) checkDiffSize(rng string) error {
 
 // checkSecrets scans only added lines. Pre-existing content is not this
 // deploy's doing, and flagging it would make the gate unpassable.
-func (o *orchestrator) checkSecrets(rng string) error {
+func (o *Orchestrator) checkSecrets(rng string) error {
 	patterns, err := compileSecretPatterns(o.cfg.SecretPatterns)
 	if err != nil {
 		return &gateError{Check: "secret scan", Detail: err.Error()}
@@ -190,7 +191,7 @@ func (o *orchestrator) checkSecrets(rng string) error {
 // divergence (behind by N commits) is reported in /status and left alone: the
 // agent is the one that merges, and it needs to be able to deploy while it
 // catches up.
-func (o *orchestrator) checkSilentRevert(candidate string) error {
+func (o *Orchestrator) checkSilentRevert(candidate string) error {
 	humanRef := o.humanRef()
 	if humanRef == "" {
 		return nil
@@ -199,7 +200,7 @@ func (o *orchestrator) checkSilentRevert(candidate string) error {
 	out, err := git(o.repoDir, "diff", "--name-only", "--diff-filter=A", candidate, humanRef)
 	if err != nil {
 		// A missing ref is not a gate failure; it means we cannot judge.
-		logf("gate: cannot compare against %s: %v", humanRef, err)
+		log.Printf("gate: cannot compare against %s: %v", humanRef, err)
 		return nil
 	}
 	missing := splitLines(out)
@@ -223,7 +224,7 @@ func (o *orchestrator) checkSilentRevert(candidate string) error {
 // humans have" means once a remote exists. Falls back to the local branch, and
 // returns "" when neither is present — on a fresh install with no remote there
 // is nothing to compare against.
-func (o *orchestrator) humanRef() string {
+func (o *Orchestrator) humanRef() string {
 	remote := "origin/" + o.cfg.HumanBranch
 	if gitOK(o.repoDir, "rev-parse", "--verify", "--quiet", remote) {
 		return remote
@@ -243,7 +244,7 @@ type branchDivergence struct {
 	Behind int    `json:"behind"`
 }
 
-func (o *orchestrator) machineDivergence() *branchDivergence {
+func (o *Orchestrator) machineDivergence() *branchDivergence {
 	humanRef := o.humanRef()
 	if humanRef == "" {
 		return nil

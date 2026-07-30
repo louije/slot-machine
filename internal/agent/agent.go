@@ -1,19 +1,25 @@
-package main
+package agent
 
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"slot-machine/internal/agent/store"
 )
 
-type agentService struct {
-	store   *agentStore
-	manager *agentManager
+// Service is the agent's HTTP surface: the chat UI, the conversation API, and
+// the SSE stream. It is mounted on the app's public port by the proxy, so the
+// chat lives at the app's own origin.
+type Service struct {
+	db      *store.Store
+	manager *Manager
 
 	agentBin   string
 	workDir    string // the machine slot — the agent's worktree
@@ -41,7 +47,7 @@ var titlePattern = regexp.MustCompile(`\[\[TITLE:\s*(.+?)\]\]`)
 // may close the connection.
 const streamKeepalive = 15 * time.Second
 
-func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (a *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/chat":
 		a.handleChat(w, r)
@@ -105,19 +111,19 @@ func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *agentService) handleListConversations(w http.ResponseWriter, r *http.Request) {
-	list, err := a.store.listConversations()
+func (a *Service) handleListConversations(w http.ResponseWriter, r *http.Request) {
+	list, err := a.db.ListConversations()
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 	if list == nil {
-		list = []conversationRow{}
+		list = []store.Conversation{}
 	}
 	writeJSON(w, 200, list)
 }
 
-func (a *agentService) handleCreateConversation(w http.ResponseWriter, r *http.Request) {
+func (a *Service) handleCreateConversation(w http.ResponseWriter, r *http.Request) {
 	user := a.extractUser(r)
 
 	// Fallback: allow user from body in "none" mode.
@@ -132,7 +138,7 @@ func (a *agentService) handleCreateConversation(w http.ResponseWriter, r *http.R
 	}
 
 	id := fmt.Sprintf("conv-%d", time.Now().UnixNano())
-	conv, err := a.store.createConversation(id, user)
+	conv, err := a.db.CreateConversation(id, user)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -140,8 +146,8 @@ func (a *agentService) handleCreateConversation(w http.ResponseWriter, r *http.R
 	writeJSON(w, 200, conv)
 }
 
-func (a *agentService) handleGetConversation(w http.ResponseWriter, r *http.Request, convID string) {
-	conv, err := a.store.getConversation(convID)
+func (a *Service) handleGetConversation(w http.ResponseWriter, r *http.Request, convID string) {
+	conv, err := a.db.GetConversation(convID)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -151,7 +157,7 @@ func (a *agentService) handleGetConversation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	msgs, err := a.store.getMessages(convID, 0)
+	msgs, err := a.db.GetMessages(convID, 0)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -163,19 +169,19 @@ func (a *agentService) handleGetConversation(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-func (a *agentService) handleDeleteConversation(w http.ResponseWriter, r *http.Request, convID string) {
+func (a *Service) handleDeleteConversation(w http.ResponseWriter, r *http.Request, convID string) {
 	if a.manager.isPending(convID) {
 		writeJSON(w, 409, map[string]string{"error": "agent is still working on this conversation"})
 		return
 	}
-	if err := a.store.deleteConversation(convID); err != nil {
+	if err := a.db.DeleteConversation(convID); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 	w.WriteHeader(204)
 }
 
-func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request, convID string) {
+func (a *Service) handleSendMessage(w http.ResponseWriter, r *http.Request, convID string) {
 	if r.Method != "POST" {
 		http.Error(w, "method not allowed", 405)
 		return
@@ -193,7 +199,7 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	conv, err := a.store.getConversation(convID)
+	conv, err := a.db.GetConversation(convID)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -205,7 +211,7 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 
 	// Refuse before storing, so a rejected message does not sit in the
 	// transcript looking like it was accepted.
-	work := agentWork{
+	turn := turn{
 		convID:       convID,
 		prompt:       msg.Content,
 		sessionID:    conv.SessionID,
@@ -219,7 +225,7 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 		timeout:      a.timeout,
 	}
 
-	if _, err := a.store.addMessage(convID, "user", msg.Content); err != nil {
+	if _, err := a.db.AddMessage(convID, "user", msg.Content); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -227,10 +233,10 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 	// Regenerated per turn: the agent shares this machine's filesystem, so a
 	// fresh copy each turn bounds any tampering to a single turn.
 	if err := a.writeAgentPolicy(); err != nil {
-		logf("agent: writing tool policy: %v", err)
+		log.Printf("agent: writing tool policy: %v", err)
 	}
 
-	if err := a.manager.enqueue(work); err != nil {
+	if err := a.manager.enqueue(turn); err != nil {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
@@ -240,14 +246,14 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-func (a *agentService) resolveBin() string {
+func (a *Service) resolveBin() string {
 	if a.agentBin != "" {
 		return a.agentBin
 	}
 	return "claude"
 }
 
-func (a *agentService) buildAgentEnv() []string {
+func (a *Service) buildAgentEnv() []string {
 	var env []string
 	if a.envFunc != nil {
 		env = a.envFunc()
@@ -272,7 +278,7 @@ func (a *agentService) buildAgentEnv() []string {
 	return env
 }
 
-func (a *agentService) handleCancel(w http.ResponseWriter, r *http.Request, convID string) {
+func (a *Service) handleCancel(w http.ResponseWriter, r *http.Request, convID string) {
 	if r.Method != "POST" {
 		http.Error(w, "method not allowed", 405)
 		return
@@ -291,8 +297,8 @@ func (a *agentService) handleCancel(w http.ResponseWriter, r *http.Request, conv
 // conversation that is queued as well as one that is running — with a shared
 // agent slot, waiting for your turn is a normal state and the stream should stay
 // open through it.
-func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, convID string) {
-	conv, err := a.store.getConversation(convID)
+func (a *Service) handleStream(w http.ResponseWriter, r *http.Request, convID string) {
+	conv, err := a.db.GetConversation(convID)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -327,9 +333,9 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 	for {
 		events := a.manager.events()
 
-		msgs, err := a.store.getMessages(convID, afterID)
+		msgs, err := a.db.GetMessages(convID, afterID)
 		if err != nil {
-			logf("stream: reading messages for %s: %v", convID, err)
+			log.Printf("stream: reading messages for %s: %v", convID, err)
 		}
 		for _, m := range msgs {
 			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", m.ID, m.Type, m.Content)
@@ -337,9 +343,9 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 		}
 		flusher.Flush()
 
-		conv, err := a.store.getConversation(convID)
+		conv, err := a.db.GetConversation(convID)
 		if err != nil {
-			logf("stream: reading conversation %s: %v", convID, err)
+			log.Printf("stream: reading conversation %s: %v", convID, err)
 		}
 		status := "idle"
 		if conv != nil {
@@ -360,5 +366,58 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
 		}
+	}
+}
+
+// Options configures a Service.
+type Options struct {
+	Store   *store.Store
+	Manager *Manager
+
+	// Bin is the Claude CLI. Empty falls back to "claude" on PATH.
+	Bin string
+	// WorkDir is the machine slot: the agent's own worktree, which the daemon
+	// never rewrites.
+	WorkDir string
+	// DataDir holds the generated tool policy, deliberately outside WorkDir.
+	DataDir string
+	// ConfigPath is denied to the agent's file tools.
+	ConfigPath string
+	// Env supplies the app's environment to each turn, evaluated per turn so an
+	// edited env_file is picked up without a restart.
+	Env func() []string
+
+	AuthMode       string
+	AuthSecret     string
+	AllowedTools   []string
+	DeniedCommands []string
+	Model          string
+	Timeout        time.Duration
+	MachineBranch  string
+	HumanBranch    string
+	ChatTitle      string
+	ChatAccent     string
+}
+
+// NewService wires the agent's HTTP surface.
+func NewService(opts Options) *Service {
+	return &Service{
+		db:             opts.Store,
+		manager:        opts.Manager,
+		agentBin:       opts.Bin,
+		workDir:        opts.WorkDir,
+		dataDir:        opts.DataDir,
+		configPath:     opts.ConfigPath,
+		envFunc:        opts.Env,
+		authMode:       opts.AuthMode,
+		authSecret:     opts.AuthSecret,
+		allowedTools:   opts.AllowedTools,
+		deniedCommands: opts.DeniedCommands,
+		model:          opts.Model,
+		timeout:        opts.Timeout,
+		machineBranch:  opts.MachineBranch,
+		humanBranch:    opts.HumanBranch,
+		chatTitle:      opts.ChatTitle,
+		chatAccent:     opts.ChatAccent,
 	}
 }

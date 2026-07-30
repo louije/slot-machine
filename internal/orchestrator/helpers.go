@@ -1,45 +1,12 @@
-package main
+package orchestrator
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"os/exec"
 	"strings"
 )
-
-func logf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "slot-machine: "+format+"\n", args...)
-}
-
-func loadEnvFile(path string) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var env []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.Contains(line, "=") {
-			env = append(env, line)
-		}
-	}
-	return env, scanner.Err()
-}
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
-}
 
 // git runs a git command in dir and returns trimmed stdout. Stderr is folded
 // into the error so failures explain themselves.
@@ -64,13 +31,23 @@ func gitOK(dir string, args ...string) bool {
 	return err == nil
 }
 
-func gitHeadCommit(dir string) (string, error) {
+// HeadCommit resolves HEAD in dir. Exported because the CLI needs it to default
+// `deploy` to the current commit.
+func HeadCommit(dir string) (string, error) {
 	return git(dir, "rev-parse", "HEAD")
 }
 
-func shortHash(s string) string {
+// ShortHash is the slot-naming form of a commit: eight characters, which is what
+// makes slot directories readable on disk.
+func ShortHash(s string) string {
 	if len(s) > 8 {
 		return s[:8]
 	}
 	return s
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(v)
 }

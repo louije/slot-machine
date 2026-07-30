@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"encoding/json"
@@ -38,7 +38,7 @@ import (
 // deploying a web app, written as they would actually be typed.
 //
 // Kept deliberately short. A long list of near-misses reads as protection
-// without being any, and every entry that fires on legitimate work is an entry
+// without being any, and every entry that fires on legitimate turn is an entry
 // that teaches the agent to find another way around.
 var deniedCommands = []string{
 	// Destroying the machine or someone else's data.
@@ -84,13 +84,13 @@ var deniedCommands = []string{
 }
 
 // agentPolicyPath is where the generated settings file lives.
-func (a *agentService) agentPolicyPath() string {
+func (a *Service) agentPolicyPath() string {
 	return filepath.Join(a.dataDir, "agent-settings.json")
 }
 
 // writeAgentPolicy regenerates the policy file before every turn, so an agent
 // that removed it gets it back on its next message.
-func (a *agentService) writeAgentPolicy() error {
+func (a *Service) writeAgentPolicy() error {
 	absConfig, err := filepath.Abs(a.configPath)
 	if err != nil {
 		absConfig = a.configPath

@@ -1,4 +1,4 @@
-package main
+package orchestrator
 
 import (
 	"fmt"
@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"slot-machine/internal/config"
 )
 
 type slot struct {
@@ -33,7 +35,7 @@ func findFreePort() (int, error) {
 	return port, nil
 }
 
-func (o *orchestrator) runSetup(dir string, appPort, intPort int) error {
+func (o *Orchestrator) runSetup(dir string, appPort, intPort int) error {
 	cmd := exec.Command("/bin/sh", "-c", o.cfg.SetupCommand)
 	cmd.Dir = dir
 	cmd.Env = o.buildEnv(appPort, intPort)
@@ -42,14 +44,14 @@ func (o *orchestrator) runSetup(dir string, appPort, intPort int) error {
 	return cmd.Run()
 }
 
-func (o *orchestrator) buildEnv(appPort, intPort int) []string {
+func (o *Orchestrator) buildEnv(appPort, intPort int) []string {
 	env := os.Environ()
 	if o.cfg.EnvFile != "" {
 		envPath := o.cfg.EnvFile
 		if !filepath.IsAbs(envPath) {
 			envPath = filepath.Join(o.repoDir, envPath)
 		}
-		if extra, err := loadEnvFile(envPath); err == nil {
+		if extra, err := config.LoadEnvFile(envPath); err == nil {
 			env = append(env, extra...)
 		}
 	}
@@ -64,7 +66,7 @@ func (o *orchestrator) buildEnv(appPort, intPort int) []string {
 	return env
 }
 
-func (o *orchestrator) startProcess(dir, commit string, appPort, intPort int) (*slot, error) {
+func (o *Orchestrator) startProcess(dir, commit string, appPort, intPort int) (*slot, error) {
 	cmd := exec.Command("/bin/sh", "-c", o.cfg.StartCommand)
 	cmd.Dir = dir
 	cmd.Env = o.buildEnv(appPort, intPort)
@@ -95,8 +97,8 @@ func (o *orchestrator) startProcess(dir, commit string, appPort, intPort int) (*
 		o.mu.Lock()
 		s.alive = false
 		if o.liveSlot == s {
-			o.appProxy.clearTarget()
-			o.intProxy.clearTarget()
+			o.appProxy.ClearTarget()
+			o.intProxy.ClearTarget()
 		}
 		o.mu.Unlock()
 		close(s.done)
@@ -105,7 +107,7 @@ func (o *orchestrator) startProcess(dir, commit string, appPort, intPort int) (*
 	return s, nil
 }
 
-func (o *orchestrator) drainAll() {
+func (o *Orchestrator) DrainAll() {
 	o.mu.Lock()
 	var slots []*slot
 	if o.liveSlot != nil {
@@ -120,7 +122,7 @@ func (o *orchestrator) drainAll() {
 	}
 }
 
-func (o *orchestrator) drain(s *slot) {
+func (o *Orchestrator) drain(s *slot) {
 	if s == nil || s.cmd == nil || s.cmd.Process == nil {
 		return
 	}
@@ -135,7 +137,7 @@ func (o *orchestrator) drain(s *slot) {
 	}
 }
 
-func (o *orchestrator) healthCheck(s *slot) bool {
+func (o *Orchestrator) healthCheck(s *slot) bool {
 	timeout := time.Duration(o.cfg.HealthTimeoutMs) * time.Millisecond
 	deadline := time.Now().Add(timeout)
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", s.intPort, o.cfg.HealthEndpoint)

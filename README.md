@@ -409,6 +409,22 @@ slot-machine injects these into the app process:
 | `GET` | `/agent/conversations/:id/stream` | SSE stream (`system`, `assistant`, `tool_use`, `tool_result`, `done`, `status`) |
 | `POST` | `/agent/conversations/:id/cancel` | Kill running agent |
 
+## Code layout
+
+```
+internal/config        the app contract: load, defaults, validation
+internal/proxy         the reverse proxy that owns the public port
+internal/orchestrator  slots, processes, health, the gate, rollback
+internal/agent         the chat service and the agent supervisor
+internal/agent/store   conversation and event persistence
+cmd/slot-machine       the CLI, and the wiring between the above
+```
+
+`orchestrator` and `agent` do not import each other, and that is the point. The
+agent asks for a deploy by running `slot-machine deploy`, the same command a
+human runs, so there is no privileged internal path to secure. The orchestrator
+takes the agent as an `http.Handler` and knows nothing else about it.
+
 ## Tests
 
 ```sh

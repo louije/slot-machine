@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	_ "embed"
@@ -10,12 +10,12 @@ import (
 //go:embed static/chat.html
 var chatHTML string
 
-func (a *agentService) handleChat(w http.ResponseWriter, r *http.Request) {
+func (a *Service) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(chatHTML))
 }
 
-func (a *agentService) handleChatConfig(w http.ResponseWriter, r *http.Request) {
+func (a *Service) handleChatConfig(w http.ResponseWriter, r *http.Request) {
 	title := a.chatTitle
 	if title == "" {
 		title = "slot-machine"
@@ -28,7 +28,7 @@ func (a *agentService) handleChatConfig(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (a *agentService) handleChatCSS(w http.ResponseWriter, r *http.Request) {
+func (a *Service) handleChatCSS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/css")
 	data, err := os.ReadFile(filepath.Join(a.workDir, "chat.css"))
 	if err != nil {

@@ -63,6 +63,14 @@ The spec is small enough to implement in ~500 lines of any language. The test su
 
 ## Implementation Notes
 
+The reference implementation keeps the orchestrator in `internal/orchestrator`,
+depending only on `internal/config` and `internal/proxy`. It has no dependency on
+the agent — the agent is injected as an `http.Handler` for the paths it serves,
+and asks for deploys through the CLI like any other caller. Anyone implementing
+this spec can do the same: the deploy machinery does not need to know that an
+agent exists.
+
+
 The orchestrator needs to be a single static binary with no runtime dependencies — it sits alongside apps that could be Node, Python, Ruby, and shouldn't compete for the same runtime.
 
 - **Go** — single-binary, fast development cycle. The standard library covers everything needed (HTTP server, process management, filesystem, JSON). Better for a v1 you want to build quickly and iterate on.

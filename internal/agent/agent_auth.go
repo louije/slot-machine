@@ -1,17 +1,18 @@
-package main
+package agent
 
 import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-func (a *agentService) extractUser(r *http.Request) string {
+func (a *Service) extractUser(r *http.Request) string {
 	header := r.Header.Get("X-SlotMachine-User")
 	switch a.authMode {
 	case "hmac":
@@ -48,7 +49,7 @@ const systemPromptBase = `You are an AI assistant embedded in a web application 
 
 Your working directory is the *machine slot* — a git worktree checked out on the
 %s branch. It is yours: slot-machine never rewrites, renames or force-checks-out
-this directory, so uncommitted work here is safe across deploys.
+this directory, so uncommitted turn here is safe across deploys.
 
 The application serving real traffic runs from a different directory, from a
 specific commit. Your edits change nothing about production until you deploy.
@@ -84,9 +85,9 @@ also hides it.
 If you believe a refusal is wrong, say so in the conversation and stop. The
 thresholds live in slot-machine.json, which a human can change and you cannot.
 
-## Staying current with human work
+## Staying current with human turn
 
-Humans commit to %s; you commit to %s. Before you change code, merge their work:
+Humans commit to %s; you commit to %s. Before you change code, merge their turn:
 
   git fetch origin %s
   git merge origin/%s
@@ -96,7 +97,7 @@ you, say so rather than guessing. ` + "`slot-machine status`" + ` shows how far 
 branches have drifted.
 
 If you deploy a commit that is missing files the human branch has, the deploy is
-refused, because promoting it would delete their work from production with no
+refused, because promoting it would delete their turn from production with no
 error at all.
 
 ## When you hit a wall
@@ -154,7 +155,7 @@ const maxInstructionBytes = 64 * 1024
 // receives the app's environment, secrets included — but it is worth knowing
 // before putting anything in CLAUDE.md that you would not put in a process
 // listing.
-func (a *agentService) buildSystemPrompt() string {
+func (a *Service) buildSystemPrompt() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, systemPromptBase,
 		a.machineBranch, a.humanBranch, a.humanBranch, a.machineBranch,
@@ -168,7 +169,7 @@ func (a *agentService) buildSystemPrompt() string {
 		}
 
 		if len(data) > maxInstructionBytes {
-			logf("agent: %s is %d bytes; using the first %d and ignoring the rest "+
+			log.Printf("agent: %s is %d bytes; using the first %d and ignoring the rest "+
 				"(the system prompt is one command-line argument and cannot exceed the OS limit)",
 				name, len(data), maxInstructionBytes)
 			data = data[:maxInstructionBytes]
