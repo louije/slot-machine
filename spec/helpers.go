@@ -299,6 +299,25 @@ func orchestratorBinary(t *testing.T) string {
 	return abs
 }
 
+// daemonEnv is the environment every daemon this suite starts must run with.
+//
+// The one thing it does is pin SLOT_MACHINE_AGENT_BIN, and that is not
+// optional. Without it a daemon that finds no `claude` downloads and installs
+// the real Claude Code before it binds the public port — once per test, in
+// parallel. A developer machine usually has claude on PATH, so this never
+// happens locally; a clean CI runner does not, so it happened on every run.
+//
+// The suite was green here and red on GitHub for its entire existence because
+// of it, and the failure it produced ("port did not respond 200 within 5s")
+// pointed at the proxy rather than at a network download blocking startup.
+//
+// Every exec.Command that starts a daemon in this package must use this. A test
+// that hand-rolls its own spawn is how the two that did got missed.
+func daemonEnv(t *testing.T) []string {
+	t.Helper()
+	return append(os.Environ(), "SLOT_MACHINE_AGENT_BIN="+testagentBinary(t))
+}
+
 // startOrchestrator launches the orchestrator binary as a subprocess and waits
 // until its HTTP API is reachable. Returns a handle for stopping it later.
 //
@@ -321,6 +340,8 @@ func startOrchestrator(t *testing.T, binary, contractPath, repoDir string, apiPo
 		"--port", fmt.Sprintf("%d", apiPort),
 		"--no-proxy",
 	)
+
+	cmd.Env = daemonEnv(t)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

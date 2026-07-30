@@ -548,6 +548,7 @@ func TestDaemonShutdownDrainsProcesses(t *testing.T) {
 		"--port", fmt.Sprintf("%d", apiPort),
 		"--no-proxy",
 	)
+	cmd.Env = daemonEnv(t)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	release()
@@ -784,6 +785,7 @@ func TestDaemonRestart(t *testing.T) {
 			"--port", fmt.Sprintf("%d", apiPort),
 			"--no-proxy",
 		)
+		cmd.Env = daemonEnv(t)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {

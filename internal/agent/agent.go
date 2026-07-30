@@ -21,8 +21,9 @@ type Service struct {
 	db      *store.Store
 	manager *Manager
 
-	agentBin   string
-	workDir    string // the machine slot — the agent's worktree
+	agentBin   string        // a fixed path, used by tests
+	binFunc    func() string // resolved lazily; may block on an install
+	workDir    string        // the machine slot — the agent's worktree
 	repoDir    string
 	dataDir    string
 	configPath string
@@ -260,7 +261,20 @@ func (a *Service) handleSendMessage(w http.ResponseWriter, r *http.Request, conv
 	})
 }
 
+// resolveBin returns the Claude CLI to run for this turn.
+//
+// binFunc may block: on a machine with no Claude Code installed, the daemon
+// downloads it, and resolution waits for that download. Waiting here is right
+// and waiting at startup was wrong — a chat turn can afford to wait for the
+// agent's binary, but the app's public port cannot. It used to be resolved
+// before the port was bound, so a fresh install left the application
+// unreachable for the length of a download.
 func (a *Service) resolveBin() string {
+	if a.binFunc != nil {
+		if bin := a.binFunc(); bin != "" {
+			return bin
+		}
+	}
 	if a.agentBin != "" {
 		return a.agentBin
 	}
@@ -388,8 +402,13 @@ type Options struct {
 	Store   *store.Store
 	Manager *Manager
 
-	// Bin is the Claude CLI. Empty falls back to "claude" on PATH.
+	// Bin is a fixed path to the Claude CLI. Empty falls back to BinFunc, then
+	// to "claude" on PATH.
 	Bin string
+	// BinFunc resolves the Claude CLI on first use and may block while one is
+	// installed. Supplying this instead of Bin keeps a download off the startup
+	// path, where it would delay the app's public port.
+	BinFunc func() string
 	// WorkDir is the machine slot: the agent's own worktree, which the daemon
 	// never rewrites.
 	WorkDir string
@@ -424,6 +443,7 @@ func NewService(opts Options) *Service {
 		db:             opts.Store,
 		manager:        opts.Manager,
 		agentBin:       opts.Bin,
+		binFunc:        opts.BinFunc,
 		workDir:        opts.WorkDir,
 		dataDir:        opts.DataDir,
 		configPath:     opts.ConfigPath,

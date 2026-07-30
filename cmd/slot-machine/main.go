@@ -200,21 +200,43 @@ func cmdStart(args []string) {
 		fmt.Printf("recovered %d interrupted agent session(s)\n", n)
 	}
 
-	agentBin := agent.ResolveClaude(*dataDir)
-	if agentBin == "" {
-		var installErr error
-		agentBin, installErr = agent.InstallClaude(*dataDir)
-		if installErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: %v\n", installErr)
-			fmt.Fprintln(os.Stderr, "set SLOT_MACHINE_AGENT_BIN to the claude binary path")
+	// Find the Claude CLI in the background, installing it if there is none.
+	//
+	// In the background because installing means a download, and this used to
+	// run inline — ahead of StartProxies and the auto-deploy — so on a machine
+	// without Claude Code the application stayed unreachable for the length of
+	// that download. The app is the thing this daemon exists to keep serving; it
+	// must not wait on a tool that only the chat needs.
+	//
+	// Turns wait for this instead, via BinFunc: a chat turn can afford to block
+	// on the agent's binary, a public port cannot.
+	var agentBin string
+	agentBinReady := make(chan struct{})
+	go func() {
+		defer close(agentBinReady)
+
+		agentBin = agent.ResolveClaude(*dataDir)
+		if agentBin == "" {
+			var installErr error
+			agentBin, installErr = agent.InstallClaude(*dataDir)
+			if installErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: %v\n", installErr)
+				fmt.Fprintln(os.Stderr, "set SLOT_MACHINE_AGENT_BIN to the claude binary path")
+				return
+			}
 		}
-	}
-	if agentBin != "" {
 		if v := agent.CLIVersion(agentBin); v != "" {
 			fmt.Printf("agent binary: %s (%s)\n", agentBin, v)
 		} else {
 			fmt.Printf("agent binary: %s\n", agentBin)
 		}
+	}()
+
+	// Reading agentBin after receiving on the closed channel is ordered by the
+	// close; nothing else reads it.
+	resolveAgentBin := func() string {
+		<-agentBinReady
+		return agentBin
 	}
 
 	// Declared before the agent service so the service can ask it which app is
@@ -226,7 +248,7 @@ func cmdStart(args []string) {
 	svc := agent.NewService(agent.Options{
 		Store:          st,
 		Manager:        mgr,
-		Bin:            agentBin,
+		BinFunc:        resolveAgentBin,
 		WorkDir:        filepath.Join(*dataDir, orchestrator.MachineSlotName),
 		DataDir:        *dataDir,
 		ConfigPath:     *configPath,

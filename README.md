@@ -226,7 +226,7 @@ All fields in `slot-machine.json`:
 | `pre_deploy_timeout_ms` | `120000` | How long `pre_deploy_command` may take |
 | `schema_status_endpoint` | — | Path serving schema compatibility (see Migrations) |
 | `chat_title` | `slot-machine` | Title shown in the chat header |
-| `chat_accent` | `#2563eb` | CSS accent color for the chat UI |
+| `chat_accent` | — | CSS accent color for the chat UI. Unset leaves the stylesheet's own `#2563eb` |
 
 Missing values get the defaults above. A config that fails validation stops the
 daemon with the reason rather than starting in a broken state.

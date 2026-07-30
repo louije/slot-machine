@@ -172,7 +172,7 @@ The `internal_port` is separate from the public-facing `port`. Health checks and
 The orchestrator and app communicate over endpoints that are never exposed to the internet. The app listens on two interfaces:
 
 - **Public port** (e.g. `3001`) — serves actual user traffic through the reverse proxy.
-- **Internal port** (e.g. `3901`) — serves health checks, schema status, and app-managed operations like migrations. Bound to `localhost` only. The proxy never routes to this port.
+- **Internal port** (e.g. `3901`) — serves health checks, schema status, the agent's authorization endpoint, and app-managed operations like migrations. The *public* proxy never routes to it (spec `R8`), so nothing arriving on the public port can reach it. A second listener on the configured `internal_port` does forward to the live slot's internal port (`R9`), so an operator or a sibling process on the machine can reach whichever version is live; it binds loopback by default like every other listener.
 
 This means no TLS, no auth tokens, no API keys to rotate for internal communication. The orchestrator calls `http://localhost:3901/healthz` and that's it. Nothing outside the machine can reach it.
 
