@@ -47,6 +47,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
+      # A floor, not a requirement: the harness and impl/ruby use nothing newer
+      # than Ruby 2.5 semantics, so raising this is safe.
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"

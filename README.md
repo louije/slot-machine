@@ -428,12 +428,18 @@ slot-machine injects these into the app process:
 `docs/orchestrator-spec.md` is a normative spec: 31 numbered requirements,
 written so that an orchestrator can be implemented from the document alone.
 
-It is kept honest by a second implementation. `impl/ruby` is about 500 lines of
-Ruby that implements the spec and nothing else — no agent, no chat, no deploy
-gate, no machine branch. It exists to be different: it materialises slots with
-`git archive` instead of git worktrees, so a slot has no `.git` in it at all, and
-names them by generation rather than by commit. Both implementations pass the
-same suite.
+It is kept honest by a second implementation. `impl/ruby` implements the spec and
+nothing else — no agent, no chat, no deploy gate, no machine branch. It exists to
+be different: it materialises slots with `git archive` instead of git worktrees,
+so a slot has no `.git` in it at all, and names them by generation rather than by
+commit. Both implementations pass the same suite.
+
+**Go is the implementation you run**, and not because it is the more finished
+one. An orchestrator sits beside apps that might be Node, Python or Ruby and has
+to outlive their deploys; a Ruby orchestrator on a box whose app is also Ruby
+makes the app's runtime version and the supervisor's the same decision. The Go
+implementation is a static binary with no such coupling. `impl/ruby` is a
+conformance fixture and says so — see `impl/ruby/README.md`.
 
 ```sh
 ruby spec/conformance/coverage_test.rb    # every requirement has a test
