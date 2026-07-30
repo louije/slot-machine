@@ -41,14 +41,19 @@ know anything about it.
 
 ### JS module (full control)
 
+> **Not implemented.** `/chat.js` does not exist; only the iframe above works
+> today. Left here as the intended shape rather than deleted, because the
+> reasoning still holds — but it is a plan, not a feature.
+
 ```html
 <script src="/chat.js"></script>
 <div id="agent"></div>
 <script>SlotMachine.chat('#agent')</script>
 ```
 
-The module renders into the given container. The host app controls layout and
-can override styles. API calls go to `/agent/*` on the same origin.
+The module would render into the given container, letting the host app control
+layout and override styles, with API calls going to `/agent/*` on the same
+origin.
 
 Both modes work because the chat is served through the app's own port via
 the proxy intercept. No cross-origin issues.
@@ -335,11 +340,14 @@ slot-machine injects a system prompt when spawning the Claude CLI. It
 combines two layers:
 
 1. **slot-machine context** — the deployment workflow, branch model, and
-   constraints. Same for all apps. Injected via `--system-prompt`.
+   constraints. Same for all apps.
 2. **App context** — what the app does, how it works, project-specific
-   instructions. Read from a file in the repo (`CLAUDE.md` or the path in
-   `agent_prompt`). Loaded by Claude Code automatically when `--cwd` points
-   to a repo that contains it.
+   instructions. Read from the first of `AGENTS.slot-machine.md`, `AGENTS.md`,
+   `CLAUDE.md` found in the machine slot.
+
+Both are assembled into one file, written to `<data>/agent-system-prompt.md`, and
+passed with `--append-system-prompt-file`. There is no `agent_prompt` config
+field: the instruction file is discovered, not configured.
 
 The slot-machine context covers:
 
