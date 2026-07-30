@@ -23,6 +23,7 @@
 $LOAD_PATH.unshift(__dir__)
 
 require 'minitest/autorun'
+require 'socket'
 require 'time'
 require 'support/harness'
 
@@ -42,6 +43,18 @@ class ConformanceTest < Minitest::Test
 
   def repo
     @orch.repo
+  end
+
+  # One of this machine's own non-loopback addresses, or nil if it has none.
+  #
+  # Used to connect to the orchestrator the way something else on the network
+  # would. Link-local IPv6 is skipped because it needs a scope id to connect to,
+  # and a private IPv4 is the case that actually matters: an implementation
+  # bound to 0.0.0.0 accepts here, one bound to 127.0.0.1 refuses.
+  def routable_address
+    Socket.ip_address_list.find do |addr|
+      addr.ipv4? && !addr.ipv4_loopback? && !addr.ipv4_multicast?
+    end&.ip_address
   end
 
   # The spec defines exactly these status fields. Asserting on the set keeps an
@@ -387,6 +400,40 @@ class ConformanceTest < Minitest::Test
     assert response['success'],
            "a deploy immediately after readiness was refused (HTTP #{deploy_code}): " \
            'startup work must finish before GET / answers'
+  end
+
+  # The deploy API carries no credential, so the only thing standing between a
+  # promotion and the rest of the network is where the socket is bound.
+  #
+  # This connects from one of the machine's own routable addresses rather than
+  # over loopback — which is the whole point, and the reason the divergence it
+  # was written for went unnoticed for so long. Every other test in this file
+  # reaches the API at 127.0.0.1, where a 0.0.0.0 bind and a 127.0.0.1 bind are
+  # indistinguishable.
+  # covers: R32
+  def test_the_api_is_not_reachable_from_off_host
+    address = routable_address
+    skip 'no non-loopback address on this machine' if address.nil?
+
+    start
+
+    # Sanity: the API must be up on loopback, or a refused connection below
+    # would prove nothing at all.
+    _, code = @orch.send(:api_get, '/')
+    assert_equal 200, code, 'the API must be reachable on loopback before this test means anything'
+
+    reachable =
+      begin
+        Socket.tcp(address, @orch.ports.api, connect_timeout: 2, &:close)
+        true
+      rescue SystemCallError, IO::TimeoutError
+        false
+      end
+
+    refute reachable,
+           "the orchestrator's API accepted a connection on #{address}:#{@orch.ports.api}. " \
+           'POST /deploy and POST /rollback are unauthenticated, so anything that can route ' \
+           'to this host can promote or roll back production. Bind the API to 127.0.0.1.'
   end
 
   # The public port is the orchestrator's, so it answers before any deploy has

@@ -53,6 +53,21 @@ before any deploy, and MUST keep it bound for its lifetime.
 > and it is why an app whose very first deploy fails still has a reachable port
 > to report the failure on.
 
+**R32.** The orchestrator's own API MUST NOT be reachable from outside the host.
+
+> `POST /deploy` and `POST /rollback` carry no credential — §8 puts
+> authentication out of scope, and the CLI most implementations ship is a thin
+> client over these endpoints. The bind address is therefore the only thing
+> between a promotion and everyone else on the network, which makes it a
+> requirement rather than a deployment note.
+>
+> This was written as an expectation in §8 and honoured by neither prose nor
+> code: the Go implementation bound every interface while its own documentation
+> claimed localhost, and the Ruby one bound loopback. Two conformant
+> implementations disagreed about the network boundary, and the suite could not
+> see it, because it only ever connected over loopback. An expectation no test
+> can fail is a preference.
+
 **R4.** On `SIGTERM` the orchestrator MUST stop the app processes it started and
 exit.
 
@@ -247,8 +262,13 @@ of these is a bug in the test.
 - **How many old slots are kept on disk**, as long as `R22` holds.
 - **Restart recovery.** Whether an orchestrator can resume ownership of a live
   app after being restarted itself is out of scope.
-- **Authentication on the API.** Out of scope; the API is expected to be bound to
-  localhost.
+- **Authentication on the API.** Out of scope. `R32` requires the API to be
+  unreachable from off-host, which is what makes an unauthenticated API
+  defensible; how an operator then reaches it — SSH, a tunnel — is their
+  business.
+- **The bind address of the app's public port.** `R3` requires it bound;
+  where it is bound depends on whether anything fronts it. `R32` covers only the
+  orchestrator's own API, which nothing should front.
 - **Anything about a coding agent** — see [agent.md](agent.md). The Ruby
   implementation has none and is fully conformant.
 

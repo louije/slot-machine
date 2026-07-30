@@ -49,6 +49,60 @@ func TestConfigAppliesDocumentedDefaults(t *testing.T) {
 	if cfg.AgentTimeoutS == 0 {
 		t.Fatal("agent_timeout_s must have a default; an agent with no timeout can hang forever")
 	}
+
+	// The security-relevant defaults. Each of these is the safe end of a choice
+	// an operator can make, and each was at the unsafe end before: every
+	// listener bound 0.0.0.0, and agent_auth defaulted to a mode that verified
+	// nothing.
+	if cfg.Listen != "127.0.0.1" {
+		t.Errorf("listen = %q, want 127.0.0.1. slot-machine performs no authentication, "+
+			"so the bind address is the security boundary and the default must be the "+
+			"closed one.", cfg.Listen)
+	}
+	if cfg.AgentAuth != "header" {
+		t.Errorf("agent_auth = %q, want header", cfg.AgentAuth)
+	}
+	if cfg.AgentAuthHeader != "X-Authenticated-User" {
+		t.Errorf("agent_auth_header = %q, want X-Authenticated-User (what Caddy's "+
+			"forward_auth and oauth2-proxy set)", cfg.AgentAuthHeader)
+	}
+	if cfg.AgentAccess != "app" {
+		t.Errorf("agent_access = %q, want app. The app owns its user model; deferring "+
+			"to it by default is what keeps a second roster out of this config.",
+			cfg.AgentAccess)
+	}
+	if cfg.AgentAccessEndpoint != "/_slot_machine/access" {
+		t.Errorf("agent_access_endpoint = %q", cfg.AgentAccessEndpoint)
+	}
+}
+
+// An operator upgrading past the removal of `hmac` has a config that names it,
+// and a belief that it was doing something. The daemon refuses to start, which
+// is the only moment that belief can be corrected — so the message has to carry
+// the whole story, not just "invalid value".
+func TestRemovedAuthModesExplainThemselves(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []string{"hmac", "trusted"} {
+		t.Run(mode, func(t *testing.T) {
+			_, err := Load(writeConfig(t,
+				`{"start_command":"x","port":3000,"agent_auth":"`+mode+`"}`))
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			msg := err.Error()
+			for _, want := range []string{
+				"removed",      // not "invalid": it used to work, and it never worked
+				"/chat/config", // where the secret was served
+				"\"header\"",   // what to write instead
+				"\"none\"",     // and the local-development answer
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the removal message does not mention %s:\n%s", want, msg)
+				}
+			}
+		})
+	}
 }
 
 func TestConfigValidation(t *testing.T) {
@@ -60,7 +114,10 @@ func TestConfigValidation(t *testing.T) {
 		{"missing start_command", `{"port":3000}`, "start_command"},
 		{"missing port", `{"start_command":"./run.sh"}`, "port is required"},
 		{"health endpoint without slash", `{"start_command":"x","port":3000,"health_endpoint":"healthz"}`, "must start with /"},
-		{"unknown auth mode", `{"start_command":"x","port":3000,"agent_auth":"maybe"}`, "agent_auth"},
+		{"unknown auth mode", `{"start_command":"x","port":3000,"agent_auth":"maybe"}`, "must be header or none"},
+		{"unknown access mode", `{"start_command":"x","port":3000,"agent_access":"admins"}`, "must be app or allAuth"},
+		{"access endpoint without slash", `{"start_command":"x","port":3000,"agent_access_endpoint":"access"}`, "must start with /"},
+		{"header name with a colon", `{"start_command":"x","port":3000,"agent_auth_header":"X-User: v"}`, "not a valid header name"},
 		{"port collides with api_port", `{"start_command":"x","port":9100}`, "must differ"},
 		{"branches collide", `{"start_command":"x","port":3000,"machine_branch":"main"}`, "own branch"},
 		{"bad secret pattern", `{"start_command":"x","port":3000,"secret_patterns":["(unclosed"]}`, "not a valid regexp"},

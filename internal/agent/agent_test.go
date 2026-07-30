@@ -1,9 +1,6 @@
 package agent
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
 	"os"
@@ -17,53 +14,59 @@ import (
 
 func TestExtractUser(t *testing.T) {
 	t.Parallel()
-	secret := "deadbeef1234"
 
-	t.Run("hmac valid", func(t *testing.T) {
-		a := &Service{authMode: "hmac", authSecret: secret}
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write([]byte("alice"))
-		sig := hex.EncodeToString(mac.Sum(nil))
-
+	t.Run("header mode reads the configured header", func(t *testing.T) {
+		a := &Service{authMode: "header", authHeader: "X-Authenticated-User"}
 		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set("X-SlotMachine-User", "alice:"+sig)
-		if got := a.extractUser(r); got != "alice" {
-			t.Fatalf("got %q, want alice", got)
+		r.Header.Set("X-Authenticated-User", "alice@example.com")
+		if got := a.extractUser(r); got != "alice@example.com" {
+			t.Fatalf("got %q, want alice@example.com", got)
 		}
 	})
 
-	t.Run("hmac invalid sig", func(t *testing.T) {
-		a := &Service{authMode: "hmac", authSecret: secret}
+	t.Run("header name is configurable", func(t *testing.T) {
+		// An operator's proxy may copy the identity under another name; the
+		// point of the field is that they do not have to patch slot-machine.
+		a := &Service{authMode: "header", authHeader: "X-Remote-User"}
 		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set("X-SlotMachine-User", "alice:badsig")
-		if got := a.extractUser(r); got != "" {
-			t.Fatalf("got %q, want empty", got)
-		}
-	})
-
-	t.Run("hmac missing header", func(t *testing.T) {
-		a := &Service{authMode: "hmac", authSecret: secret}
-		r := httptest.NewRequest("GET", "/", nil)
-		if got := a.extractUser(r); got != "" {
-			t.Fatalf("got %q, want empty", got)
-		}
-	})
-
-	t.Run("trusted", func(t *testing.T) {
-		a := &Service{authMode: "trusted"}
-		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set("X-SlotMachine-User", "bob")
+		r.Header.Set("X-Remote-User", "bob")
 		if got := a.extractUser(r); got != "bob" {
 			t.Fatalf("got %q, want bob", got)
 		}
+		// And the default name must not be honoured when another is configured,
+		// or configuring one would only ever widen what is accepted.
+		r2 := httptest.NewRequest("GET", "/", nil)
+		r2.Header.Set("X-Authenticated-User", "mallory")
+		if got := a.extractUser(r2); got != "" {
+			t.Fatalf("got %q from an unconfigured header, want empty", got)
+		}
 	})
 
-	t.Run("none", func(t *testing.T) {
-		a := &Service{authMode: "none"}
+	t.Run("missing header is not a user", func(t *testing.T) {
+		a := &Service{authMode: "header", authHeader: "X-Authenticated-User"}
 		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set("X-SlotMachine-User", "bob")
 		if got := a.extractUser(r); got != "" {
 			t.Fatalf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("whitespace-only header is not a user", func(t *testing.T) {
+		// A proxy that sets the header unconditionally but has no identity to
+		// put in it would otherwise authenticate a user named " ".
+		a := &Service{authMode: "header", authHeader: "X-Authenticated-User"}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("X-Authenticated-User", "   ")
+		if got := a.extractUser(r); got != "" {
+			t.Fatalf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("none mode ignores the header entirely", func(t *testing.T) {
+		a := &Service{authMode: "none", authHeader: "X-Authenticated-User"}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("X-Authenticated-User", "mallory")
+		if got := a.extractUser(r); got != anonymousUser {
+			t.Fatalf("got %q, want %q", got, anonymousUser)
 		}
 	})
 }
@@ -206,7 +209,7 @@ func TestChatConfigEndpoint(t *testing.T) {
 	})
 
 	t.Run("default title", func(t *testing.T) {
-		a := &Service{authMode: "hmac", authSecret: "abc123"}
+		a := &Service{authMode: "header"}
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/chat/config", nil)
 		a.handleChatConfig(w, r)
@@ -215,11 +218,36 @@ func TestChatConfigEndpoint(t *testing.T) {
 		if !strings.Contains(body, `"chatTitle":"slot-machine"`) {
 			t.Fatalf("expected default title, got: %s", body)
 		}
-		if !strings.Contains(body, `"authMode":"hmac"`) {
-			t.Fatalf("expected authMode hmac, got: %s", body)
+		if !strings.Contains(body, `"authMode":"header"`) {
+			t.Fatalf("expected authMode header, got: %s", body)
 		}
-		if !strings.Contains(body, `"authSecret":"abc123"`) {
-			t.Fatalf("expected authSecret, got: %s", body)
+	})
+
+	// The previous version of this test asserted the opposite: that
+	// /chat/config returned "authSecret":"abc123". That is how the leak
+	// survived — it was not an oversight anyone could notice, it was a
+	// requirement the suite enforced. The route handed the HMAC signing key to
+	// any caller, because the browser needed it to sign, so anyone who could
+	// reach the port could mint a header for any username.
+	//
+	// This asserts the inverse, by shape rather than by value: no field of this
+	// response may ever carry a credential again.
+	t.Run("serves no credential of any kind", func(t *testing.T) {
+		a := &Service{authMode: "header", chatTitle: "x", chatAccent: "#fff"}
+		w := httptest.NewRecorder()
+		a.handleChatConfig(w, httptest.NewRequest("GET", "/chat/config", nil))
+
+		var fields map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &fields); err != nil {
+			t.Fatalf("unreadable config: %v", err)
+		}
+		allowed := map[string]bool{"authMode": true, "chatTitle": true, "chatAccent": true}
+		for name := range fields {
+			if !allowed[name] {
+				t.Errorf("/chat/config returned unexpected field %q. This endpoint is "+
+					"reachable by anyone the proxy admits; it must carry display "+
+					"configuration and nothing else.", name)
+			}
 		}
 	})
 }

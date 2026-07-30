@@ -1,9 +1,6 @@
 package agent
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,27 +9,57 @@ import (
 	"strings"
 )
 
+// extractUser returns the authenticated identity, or "" if there is none.
+//
+// slot-machine does not authenticate. It reads an identity that something in
+// front of it has already established — Caddy's forward_auth, oauth2-proxy,
+// Tailscale — and that is only trustworthy because nothing else can reach the
+// port: every listener binds loopback by default (config.Listen). The bind
+// address is the security boundary here; this function is just a read.
+//
+// The header used to be signed with an HMAC whose secret was served,
+// unauthenticated, from /chat/config — the browser needed it to sign. Anyone who
+// could reach the port could mint a header for any username, so the signature
+// verified nothing. It has been removed rather than repaired, because repairing
+// it means expiry, replay protection and rotation, and the proxy in front
+// already does all three properly.
 func (a *Service) extractUser(r *http.Request) string {
-	header := r.Header.Get("X-SlotMachine-User")
-	switch a.authMode {
-	case "hmac":
-		idx := strings.LastIndex(header, ":")
-		if idx < 1 {
-			return ""
-		}
-		user, sig := header[:idx], header[idx+1:]
-		mac := hmac.New(sha256.New, []byte(a.authSecret))
-		mac.Write([]byte(user))
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if !hmac.Equal([]byte(sig), []byte(expected)) {
-			return ""
-		}
-		return user
-	case "trusted":
-		return header
-	default:
-		return ""
+	if a.authMode == "none" {
+		return anonymousUser
 	}
+	return strings.TrimSpace(r.Header.Get(a.authHeader))
+}
+
+// anonymousUser is the identity in "none" mode. It is a real string rather than
+// "" so that a conversation started in local development is still attributable
+// to something, and so that "" unambiguously means "not authenticated".
+const anonymousUser = "local"
+
+// requireAccess authenticates and authorizes, writing the refusal itself.
+//
+// Every route goes through this, including /chat and /chat/config. Dispatching
+// any route above the gate is what made the previous design ineffective: the
+// config route was served first and handed out the signing secret.
+func (a *Service) requireAccess(w http.ResponseWriter, r *http.Request) (string, bool) {
+	user := a.extractUser(r)
+	if user == "" {
+		// Fail closed, and say exactly what is missing. A misconfigured proxy
+		// and a genuinely anonymous caller look identical from here, and the
+		// person most likely to read this is the operator who just set it up.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		http.Error(w, fmt.Sprintf("no %s header.\n\n"+
+			"slot-machine does not authenticate users. Put an authenticating proxy in "+
+			"front of it (Caddy forward_auth, oauth2-proxy, Tailscale) and have it set "+
+			"this header, or set \"agent_auth\": \"none\" in slot-machine.json for local "+
+			"development.", a.authHeader), 401)
+		return "", false
+	}
+
+	if v := a.authorize(r, user); !v.allow {
+		a.writeAccessDenial(w, v, user)
+		return "", false
+	}
+	return user, true
 }
 
 // agentMDCandidates is the priority order for agent instruction files.

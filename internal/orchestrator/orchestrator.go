@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -23,10 +25,9 @@ import (
 // It knows nothing about the agent. The agent asks for a deploy by running the
 // same CLI a human would, so there is no privileged internal path to secure.
 type Orchestrator struct {
-	cfg        config.Config
-	repoDir    string
-	dataDir    string
-	authSecret string // hex HMAC secret, passed to the app as SLOT_MACHINE_AUTH_SECRET
+	cfg     config.Config
+	repoDir string
+	dataDir string
 
 	mu         sync.Mutex
 	deploying  bool
@@ -467,9 +468,6 @@ type Options struct {
 	RepoDir string
 	// DataDir holds the slots, the symlinks, and the deploy journal.
 	DataDir string
-	// AuthSecret is passed to app processes as SLOT_MACHINE_AUTH_SECRET. It is
-	// deliberately not passed to the agent.
-	AuthSecret string
 	// Intercept handles the agent's own paths on the public port, so the chat
 	// lives at the app's origin without a second listener. May be nil.
 	Intercept http.Handler
@@ -480,22 +478,21 @@ type Options struct {
 func New(opts Options) *Orchestrator {
 	appAddr := ""
 	if opts.Config.Port != 0 {
-		appAddr = fmt.Sprintf(":%d", opts.Config.Port)
+		appAddr = net.JoinHostPort(opts.Config.Listen, strconv.Itoa(opts.Config.Port))
 	}
 	// Only bind a second listener when the app really uses a separate internal
 	// port; otherwise the health endpoint rides on the public one.
 	intAddr := ""
 	if opts.Config.InternalPort != 0 && opts.Config.InternalPort != opts.Config.Port {
-		intAddr = fmt.Sprintf(":%d", opts.Config.InternalPort)
+		intAddr = net.JoinHostPort(opts.Config.Listen, strconv.Itoa(opts.Config.InternalPort))
 	}
 
 	return &Orchestrator{
-		cfg:        opts.Config,
-		repoDir:    opts.RepoDir,
-		dataDir:    opts.DataDir,
-		authSecret: opts.AuthSecret,
-		appProxy:   proxy.New(appAddr, opts.Intercept),
-		intProxy:   proxy.New(intAddr, nil),
+		cfg:      opts.Config,
+		repoDir:  opts.RepoDir,
+		dataDir:  opts.DataDir,
+		appProxy: proxy.New(appAddr, opts.Intercept),
+		intProxy: proxy.New(intAddr, nil),
 	}
 }
 
@@ -514,6 +511,21 @@ func (o *Orchestrator) Shutdown() {
 	o.DrainAll()
 	o.appProxy.Shutdown()
 	o.intProxy.Shutdown()
+}
+
+// LiveInternalPort reports the live slot's INTERNAL_PORT, or 0 if nothing is
+// live.
+//
+// It exists so the agent can ask the running application who is allowed to use
+// it. The internal port is the right place for that question: R8 keeps it off
+// the public interface, so the answer cannot be solicited from outside.
+func (o *Orchestrator) LiveInternalPort() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.liveSlot == nil {
+		return 0
+	}
+	return o.liveSlot.intPort
 }
 
 // LiveCommit reports what is currently serving, or "" if nothing is.

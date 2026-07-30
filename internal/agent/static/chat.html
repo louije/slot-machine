@@ -175,7 +175,7 @@ a.sm-icon-btn{text-decoration:none}
 'use strict';
 
 // --- Config fetched from server ---
-var SM_CONFIG = { authMode:'none', authSecret:'', chatTitle:'slot-machine', chatAccent:'' };
+var SM_CONFIG = { authMode:'none', chatTitle:'slot-machine', chatAccent:'' };
 
 // --- State ---
 var state = {
@@ -183,7 +183,6 @@ var state = {
   streaming: false,
   pendingTools: {},
   lastEventId: 0,
-  authHeader: '',
   settings: { theme:'auto', toolVis:'collapsed', sysVis:'hide', fontSize:'15' }
 };
 
@@ -202,23 +201,17 @@ var $sysVis = document.getElementById('sm-sys-vis');
 var $fontSize = document.getElementById('sm-fontsize');
 
 // --- Auth ---
-async function setupAuth() {
-  if (SM_CONFIG.authMode === 'hmac' && SM_CONFIG.authSecret) {
-    var user = localStorage.getItem('sm-user') || 'chat-user';
-    var enc = new TextEncoder();
-    var key = await crypto.subtle.importKey('raw', enc.encode(SM_CONFIG.authSecret), {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
-    var sig = await crypto.subtle.sign('HMAC', key, enc.encode(user));
-    var hex = Array.from(new Uint8Array(sig)).map(function(b){return b.toString(16).padStart(2,'0')}).join('');
-    state.authHeader = user + ':' + hex;
-  } else if (SM_CONFIG.authMode === 'trusted') {
-    state.authHeader = localStorage.getItem('sm-user') || 'chat-user';
-  }
-}
+//
+// There is none here, deliberately. The page has no credential, mints no
+// header, and reads nothing from localStorage to identify you: if this page
+// loaded at all, the proxy in front of slot-machine already authenticated you
+// and set the identity header on every request, including the one that fetched
+// this file. A page that could assert its own identity would be a page that
+// could assert someone else's.
 
 // --- API ---
 async function api(method, path, body) {
   var opts = { method: method, headers: {} };
-  if (state.authHeader) opts.headers['X-SlotMachine-User'] = state.authHeader;
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -627,7 +620,7 @@ async function sendMessage() {
   try {
     var resp = await fetch('/agent/conversations/'+state.convId+'/messages', {
       method: 'POST',
-      headers: Object.assign({'Content-Type': 'application/json'}, state.authHeader ? {'X-SlotMachine-User': state.authHeader} : {}),
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({content: text})
     });
     if (resp.status === 409) {
@@ -742,8 +735,6 @@ loadSettings();
       document.documentElement.style.setProperty('--sm-accent', cfg.chatAccent);
     }
   } catch(e) { console.error('failed to load config:', e); }
-
-  await setupAuth();
 
   var convs = await loadConversations(); // sorted by renderConvList
   var items = $convList.querySelectorAll('.sm-conv-item');

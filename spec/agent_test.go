@@ -420,14 +420,20 @@ func TestAutoTitling(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 31: HMAC auth rejects unauthenticated requests
+// Test 31: authentication is read, authorization is delegated
 // ---------------------------------------------------------------------------
 //
-// When agent_auth is "hmac" (default), requests to /agent/* without a valid
-// X-SlotMachine-User header should get 401. The /chat path should still be
-// accessible (it's a static HTML page, not an API).
+// End to end, through the real proxy, with a real app answering. The unit tests
+// cover the branches; this covers the wiring — that the header survives the
+// reverse proxy, that the daemon finds the live slot's internal port, and that
+// the app's verdict reaches the caller.
+//
+// The previous version of this test asserted that /chat returned 200 without
+// any header, "not auth-protected". That was the leak, written down as a
+// requirement: /chat loads /chat/config, and /chat/config served the HMAC
+// signing secret to whoever asked.
 
-func TestHMACAuthRejectsUnauthenticated(t *testing.T) {
+func TestAgentAuthReadsHeaderAndDelegatesAccess(t *testing.T) {
 	t.Parallel()
 	bin := orchestratorBinary(t)
 	appBin := testappBinary(t)
@@ -436,37 +442,123 @@ func TestHMACAuthRejectsUnauthenticated(t *testing.T) {
 	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
 
 	repo := setupTestRepo(t, appBin, appPort, intPort)
-	// Write a contract with hmac auth (the default — just omit agent_auth).
-	contract := writeTestContractWithAuth(t, t.TempDir(), appPort, intPort, 0, "hmac")
+	contract := writeTestContractWithAuth(t, t.TempDir(), appPort, intPort, 0, "header")
 
-	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
-	_ = orch
-
-	// Deploy so the proxy is active.
+	startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	mustDeploy(t, apiPort, repo.CommitA)
 
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", appPort)
 
-	// GET /agent/conversations without auth header — should be 401.
-	code, _ := httpGet(t, proxyURL+"/agent/conversations")
-	if code != 401 {
-		t.Fatalf("expected 401 for unauthenticated GET /agent/conversations, got %d", code)
+	// Every agent path, with no identity at all. /chat is in this list on
+	// purpose: it is the page that fetches the config, and there is no version
+	// of "the UI is public but the API is not" that is coherent.
+	t.Run("no identity is refused everywhere", func(t *testing.T) {
+		for _, path := range []string{"/chat", "/chat.css", "/chat/config", "/agent/conversations"} {
+			code, body := httpGet(t, proxyURL+path)
+			if code != 401 {
+				t.Errorf("GET %s: got %d, want 401\n%s", path, code, body)
+			}
+		}
+		if code := httpPost(t, proxyURL+"/agent/conversations"); code != 401 {
+			t.Errorf("POST /agent/conversations: got %d, want 401", code)
+		}
+	})
+
+	// The testapp grants anyone whose name starts with "admin".
+	t.Run("the app grants", func(t *testing.T) {
+		code, body := httpGetAs(t, proxyURL+"/chat", "admin@example.com")
+		if code != 200 {
+			t.Fatalf("GET /chat as admin: got %d, want 200\n%s", code, body)
+		}
+		if !strings.Contains(body, "<html") {
+			t.Fatalf("expected the chat page, got: %s", body)
+		}
+		if code, _ := httpGetAs(t, proxyURL+"/agent/conversations", "admin@example.com"); code != 200 {
+			t.Errorf("GET /agent/conversations as admin: got %d, want 200", code)
+		}
+	})
+
+	// Authenticated, and refused by the app. 403 rather than 401: the identity
+	// was accepted, the permission was not.
+	t.Run("the app denies", func(t *testing.T) {
+		code, body := httpGetAs(t, proxyURL+"/chat", "intern@example.com")
+		if code != 403 {
+			t.Fatalf("GET /chat as intern: got %d, want 403\n%s", code, body)
+		}
+	})
+
+	// And the secret is gone for good: even a fully authorized caller cannot
+	// obtain a credential from the config route, because there is none.
+	t.Run("no credential is served to anyone", func(t *testing.T) {
+		code, body := httpGetAs(t, proxyURL+"/chat/config", "admin@example.com")
+		if code != 200 {
+			t.Fatalf("GET /chat/config as admin: got %d, want 200", code)
+		}
+		if strings.Contains(body, "authSecret") || strings.Contains(body, "Secret") {
+			t.Fatalf("/chat/config is serving a credential again: %s", body)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Test 31b: with nothing live, there is nobody to ask
+// ---------------------------------------------------------------------------
+//
+// The user's decision, made explicitly: no app, no chat. The alternative —
+// granting when no app is live — would mean a failed deploy widens access, in
+// the state nobody is watching.
+//
+// The daemon starts here with no successful deploy at all, which is also what a
+// fresh install looks like.
+
+func TestAgentRefusesWhenNoAppIsLive(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+
+	// A start command that never becomes healthy, so the daemon's auto-deploy of
+	// HEAD fails and no slot is ever live. This is the state a fresh box is in
+	// before its first successful deploy, and the state a broken app leaves
+	// behind — the two cases where "ask the app" has nobody to ask.
+	contract := writeContract(t, t.TempDir(), map[string]any{
+		"start_command":     "sleep 60",
+		"port":              appPort,
+		"internal_port":     intPort,
+		"health_endpoint":   "/healthz",
+		"health_timeout_ms": 1500,
+		"drain_timeout_ms":  500,
+		"agent_auth":        "header",
+	})
+
+	startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
+
+	// The proxy is bound even so — that is the point of binding it at startup —
+	// and the status API confirms nothing is live before anything is asserted.
+	if commit := status(t, apiPort).LiveCommit; commit != "" {
+		t.Fatalf("expected no live slot, got %s", commit)
 	}
 
-	// POST /agent/conversations without auth header — should be 401.
-	postCode := httpPost(t, proxyURL+"/agent/conversations")
-	if postCode != 401 {
-		t.Fatalf("expected 401 for unauthenticated POST /agent/conversations, got %d", postCode)
+	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", appPort)
+	code, body := httpGetAs(t, proxyURL+"/chat", "admin@example.com")
+	if code != 503 {
+		t.Fatalf("GET /chat with nothing live: got %d, want 503\n%s", code, body)
+	}
+	// 503 and not 403, because nothing was decided about this person — and the
+	// body has to say what to do, since the chat they would use to ask is the
+	// thing that is refusing.
+	if !strings.Contains(body, "agent_access") {
+		t.Errorf("the refusal should name the config field that changes it, got: %s", body)
 	}
 
-	// GET /chat should still return 200 HTML (not auth-protected).
-	code, body := httpGet(t, proxyURL+"/chat")
-	if code != 200 {
-		t.Fatalf("expected 200 for /chat, got %d", code)
-	}
-	if !strings.Contains(body, "<html") {
-		t.Fatalf("expected HTML for /chat, got: %s", body)
-	}
+	// The recovery path the whole design leans on: the API port is loopback and
+	// unauthenticated, so an operator on the box is never locked out of the
+	// controls even when the agent surface is refusing everyone.
+	status(t, apiPort)
 }
 
 // ---------------------------------------------------------------------------

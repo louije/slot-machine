@@ -209,7 +209,11 @@ All fields in `slot-machine.json`:
 | `env_file` | — | Loaded into the app's environment |
 | `api_port` | `9100` | Daemon API port (deploy/rollback/status) |
 | `shared_dirs` | `[]` | Directories symlinked across deploys (e.g. `["data", "uploads"]`). Must be gitignored — a tracked path fights the checkout, and slot-machine warns at startup if it finds one |
-| `agent_auth` | `hmac` | Agent auth mode (see below) |
+| `listen` | `127.0.0.1` | Bind address for `port` and `internal_port`. Widen only when the authenticating proxy is on another host |
+| `agent_auth` | `header` | Where the already-authenticated identity comes from (see below) |
+| `agent_auth_header` | `X-Authenticated-User` | Header carrying that identity |
+| `agent_access` | `app` | Who, among authenticated users, may use the agent (see below) |
+| `agent_access_endpoint` | `/_slot_machine/access` | Where the app answers that question, on its internal port |
 | `agent_allowed_tools` | Bash, Edit, Read, Write, Glob, Grep | Claude tools the agent can use |
 | `agent_model` | CLI default | `claude --model`. Unset means the run inherits the server user's `~/.claude/settings.json` |
 | `agent_timeout_s` | `1800` | Max seconds for one agent turn before it is stopped |
@@ -227,13 +231,44 @@ All fields in `slot-machine.json`:
 Missing values get the defaults above. A config that fails validation stops the
 daemon with the reason rather than starting in a broken state.
 
-### Auth modes
+### Who can use the agent
 
-| Mode | When to use |
+**slot-machine authenticates nobody.** It reads an identity that a proxy in
+front of it established, and that read is trustworthy only because every
+listener binds loopback by default. Put Caddy `forward_auth`, oauth2-proxy or
+Tailscale in front; that is the deployment model, not one option among several.
+
+| `agent_auth` | Behaviour |
 |------|------------|
-| `hmac` | Default. HMAC-SHA256 signatures, secret generated per daemon session. |
-| `trusted` | Behind a reverse proxy that handles auth upstream (e.g. Caddy + basic auth). Username passed in header, no verification. |
-| `none` | Local development only. No auth. |
+| `header` | Default. Read `agent_auth_header`. No header, `401` — on every route, `/chat` included. |
+| `none` | No identity at all; every request is `local`. Local development only. |
+
+Authentication says who you are. **Authorization is the app's job**, because
+"who is an admin" is a row in the app's database and no identity provider knows
+about it. slot-machine asks, on the app's internal port:
+
+```
+GET /_slot_machine/access        →  {"access": "allAuth"}   any authenticated user
+X-Authenticated-User: alice          {"access": "granted"}   this user, yes
+                                     {"access": "denied"}    this user, no
+```
+
+```ruby
+get '/_slot_machine/access' do
+  user = User.find_by(email: request.env['HTTP_X_AUTHENTICATED_USER'])
+  json access: user&.admin? ? 'granted' : 'denied'
+end
+```
+
+Set `agent_access: "allAuth"` to skip the call for an app you cannot modify.
+
+Anything that is not a clean yes is a no — including **no live app**, which
+means no chat until a deploy succeeds. Granting access when nothing is running
+would let a failed deploy widen who can reach the agent. Recover over SSH: the
+API port is loopback and unauthenticated, so `slot-machine status` and
+`slot-machine rollback` work when the chat does not.
+
+See [docs/agent.md](docs/agent.md#security) for the full table of failure modes.
 
 ### Authentication (Claude API)
 

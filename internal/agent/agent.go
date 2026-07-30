@@ -28,8 +28,17 @@ type Service struct {
 	configPath string
 	envFunc    func() []string
 
-	authMode       string // "hmac", "trusted", "none"
-	authSecret     string // hex-encoded HMAC secret (for "hmac" mode)
+	authMode   string // "header" or "none"
+	authHeader string // where the already-authenticated identity arrives
+
+	accessMode     string // "app" or "allAuth"
+	accessEndpoint string // asked on the live slot's internal port
+	// livePort reports the live slot's INTERNAL_PORT, or 0 when nothing is
+	// live. A function rather than a value because the live slot changes on
+	// every deploy, and injected rather than imported so this package stays
+	// independent of the orchestrator.
+	livePort func() int
+
 	allowedTools   []string
 	deniedCommands []string
 	model          string
@@ -47,7 +56,19 @@ var titlePattern = regexp.MustCompile(`\[\[TITLE:\s*(.+?)\]\]`)
 // may close the connection.
 const streamKeepalive = 15 * time.Second
 
+// ServeHTTP gates first and routes second.
+//
+// The order is the point. This used to dispatch /chat, /chat.css and
+// /chat/config before the auth check, and only checked /agent/* — so the config
+// route, which served the HMAC signing secret, was reachable by anyone. Every
+// path this handler owns now passes through requireAccess, and there is no
+// branch above it in which to forget one.
 func (a *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	user, ok := a.requireAccess(w, r)
+	if !ok {
+		return
+	}
+
 	switch r.URL.Path {
 	case "/chat":
 		a.handleChat(w, r)
@@ -60,20 +81,12 @@ func (a *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth check for /agent/* paths in hmac mode.
-	if strings.HasPrefix(r.URL.Path, "/agent/") && a.authMode == "hmac" {
-		if a.extractUser(r) == "" {
-			http.Error(w, "unauthorized", 401)
-			return
-		}
-	}
-
 	if r.URL.Path == "/agent/conversations" {
 		switch r.Method {
 		case "GET":
 			a.handleListConversations(w, r)
 		case "POST":
-			a.handleCreateConversation(w, r)
+			a.handleCreateConversation(w, r, user)
 		default:
 			http.Error(w, "method not allowed", 405)
 		}
@@ -123,20 +136,13 @@ func (a *Service) handleListConversations(w http.ResponseWriter, r *http.Request
 	writeJSON(w, 200, list)
 }
 
-func (a *Service) handleCreateConversation(w http.ResponseWriter, r *http.Request) {
-	user := a.extractUser(r)
-
-	// Fallback: allow user from body in "none" mode.
-	if user == "" && a.authMode != "hmac" {
-		var req struct {
-			User string `json:"user"`
-		}
-		if r.Body != nil {
-			json.NewDecoder(r.Body).Decode(&req)
-		}
-		user = req.User
-	}
-
+// handleCreateConversation records the conversation against the authenticated
+// user, which the router has already established.
+//
+// It used to accept a "user" field from the request body when no header
+// verified, which meant the attribution in the transcript was whatever the
+// client typed. The identity now comes from one place only.
+func (a *Service) handleCreateConversation(w http.ResponseWriter, r *http.Request, user string) {
 	id := fmt.Sprintf("conv-%d", time.Now().UnixNano())
 	conv, err := a.db.CreateConversation(id, user)
 	if err != nil {
@@ -396,7 +402,12 @@ type Options struct {
 	Env func() []string
 
 	AuthMode       string
-	AuthSecret     string
+	AuthHeader     string
+	AccessMode     string
+	AccessEndpoint string
+	// LivePort reports the live slot's internal port, or 0 if nothing is live.
+	// Nil means nothing is ever live, which denies every request in "app" mode.
+	LivePort       func() int
 	AllowedTools   []string
 	DeniedCommands []string
 	Model          string
@@ -418,7 +429,10 @@ func NewService(opts Options) *Service {
 		configPath:     opts.ConfigPath,
 		envFunc:        opts.Env,
 		authMode:       opts.AuthMode,
-		authSecret:     opts.AuthSecret,
+		authHeader:     opts.AuthHeader,
+		accessMode:     opts.AccessMode,
+		accessEndpoint: opts.AccessEndpoint,
+		livePort:       opts.LivePort,
 		allowedTools:   opts.AllowedTools,
 		deniedCommands: opts.DeniedCommands,
 		model:          opts.Model,

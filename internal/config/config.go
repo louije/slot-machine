@@ -25,7 +25,48 @@ type Config struct {
 	EnvFile         string `json:"env_file"`
 	APIPort         int    `json:"api_port"`
 
-	AgentAuth           string   `json:"agent_auth"`            // "hmac" (default), "trusted", "none"
+	// Listen is the bind address for the public and internal ports. It defaults
+	// to loopback, because slot-machine performs no authentication of its own:
+	// it consumes an identity established by whatever sits in front of it, and
+	// that is only meaningful if nothing else can reach the port.
+	//
+	// Set it to "0.0.0.0" only when the authenticating proxy lives on another
+	// host, and understand what that means: the identity header becomes
+	// assertable by anything that can route to this machine.
+	//
+	// The daemon's own API port is not covered by this field. It is always
+	// loopback — see cmd/slot-machine/main.go.
+	Listen string `json:"listen"`
+
+	// AgentAuth selects how the agent's HTTP surface learns who is asking.
+	//
+	//	"header" — read AgentAuthHeader, set by an authenticating proxy.
+	//	           A request without it is refused. This is the default.
+	//	"none"   — no identity, and therefore no authorization either.
+	//	           Local development only.
+	//
+	// There is deliberately no mode in which slot-machine authenticates a user
+	// itself. See docs/agent.md.
+	AgentAuth string `json:"agent_auth"`
+	// AgentAuthHeader carries the already-authenticated identity. The default
+	// matches what Caddy's forward_auth and oauth2-proxy set.
+	AgentAuthHeader string `json:"agent_auth_header"`
+
+	// AgentAccess selects who, among authenticated users, may use the agent.
+	//
+	//	"app"     — ask the live app over AgentAccessEndpoint. The app owns its
+	//	            own user model, so it is the only thing that can answer.
+	//	            This is the default.
+	//	"allAuth" — every authenticated user may. For an app that cannot be
+	//	            modified to answer, or one where the distinction is moot.
+	//
+	// Ignored entirely when AgentAuth is "none": there is no identity to
+	// authorize.
+	AgentAccess string `json:"agent_access"`
+	// AgentAccessEndpoint is served by the app on its INTERNAL_PORT, so it is
+	// never reachable from the public port.
+	AgentAccessEndpoint string `json:"agent_access_endpoint"`
+
 	AgentAllowedTools   []string `json:"agent_allowed_tools"`   // claude --allowed-tools
 	AgentDeniedCommands []string `json:"agent_denied_commands"` // extra Bash prefixes to deny
 	AgentModel          string   `json:"agent_model"`           // claude --model
@@ -91,8 +132,20 @@ func (c *Config) applyDefaults() {
 	if c.HealthEndpoint == "" {
 		c.HealthEndpoint = "/healthz"
 	}
+	if c.Listen == "" {
+		c.Listen = "127.0.0.1"
+	}
 	if c.AgentAuth == "" {
-		c.AgentAuth = "hmac"
+		c.AgentAuth = "header"
+	}
+	if c.AgentAuthHeader == "" {
+		c.AgentAuthHeader = "X-Authenticated-User"
+	}
+	if c.AgentAccess == "" {
+		c.AgentAccess = "app"
+	}
+	if c.AgentAccessEndpoint == "" {
+		c.AgentAccessEndpoint = "/_slot_machine/access"
 	}
 	if len(c.AgentAllowedTools) == 0 {
 		c.AgentAllowedTools = DefaultAllowedTools
@@ -130,9 +183,33 @@ func (c *Config) validate() error {
 		problems = append(problems, fmt.Sprintf("health_endpoint %q must start with /", c.HealthEndpoint))
 	}
 	switch c.AgentAuth {
-	case "hmac", "trusted", "none":
+	case "header", "none":
+	case "hmac", "trusted":
+		// Named explicitly rather than falling through to "must be header or
+		// none", because an operator who wrote "hmac" believed they had turned
+		// authentication on. Being told the value is invalid would leave that
+		// belief intact; being told why it was removed does not.
+		problems = append(problems, fmt.Sprintf(
+			"agent_auth %q was removed. It authenticated nobody: /chat/config served the "+
+				"signing secret to any caller, so anyone who could reach the port could mint "+
+				"a header for any username. Use \"header\" and put an authenticating proxy in "+
+				"front (Caddy forward_auth, oauth2-proxy, Tailscale), or \"none\" for local "+
+				"development", c.AgentAuth))
 	default:
-		problems = append(problems, fmt.Sprintf("agent_auth %q must be hmac, trusted or none", c.AgentAuth))
+		problems = append(problems, fmt.Sprintf("agent_auth %q must be header or none", c.AgentAuth))
+	}
+	switch c.AgentAccess {
+	case "app", "allAuth":
+	default:
+		problems = append(problems, fmt.Sprintf("agent_access %q must be app or allAuth", c.AgentAccess))
+	}
+	if !strings.HasPrefix(c.AgentAccessEndpoint, "/") {
+		problems = append(problems, fmt.Sprintf(
+			"agent_access_endpoint %q must start with /", c.AgentAccessEndpoint))
+	}
+	if strings.ContainsAny(c.AgentAuthHeader, " :\r\n") || c.AgentAuthHeader == "" {
+		problems = append(problems, fmt.Sprintf(
+			"agent_auth_header %q is not a valid header name", c.AgentAuthHeader))
 	}
 	if c.Port == c.APIPort {
 		problems = append(problems, fmt.Sprintf("port and api_port are both %d; they must differ", c.Port))

@@ -602,6 +602,30 @@ func httpGet(t *testing.T, url string) (int, string) {
 	return resp.StatusCode, string(body)
 }
 
+// httpGetAs is httpGet with an authenticated identity, as an authenticating
+// proxy in front of slot-machine would set it.
+//
+// slot-machine never mints this header; a test that sends it is standing in for
+// Caddy's forward_auth or oauth2-proxy, not simulating a client. That a test can
+// set it freely is exactly why every listener binds loopback.
+func httpGetAs(t *testing.T, url, user string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		t.Fatalf("building GET %s: %v", url, err)
+	}
+	req.Header.Set("X-Authenticated-User", user)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s as %s: %v", url, user, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
 // testagentBinary returns the absolute path to the compiled testagent binary.
 func testagentBinary(t *testing.T) string {
 	t.Helper()
@@ -684,7 +708,7 @@ func writeTestContractWithAuth(t *testing.T, dir string, port, internalPort, dra
 		drainTimeoutMs = 2000
 	}
 
-	contract := map[string]any{
+	return writeContract(t, dir, map[string]any{
 		"start_command":     "./start.sh",
 		"port":              port,
 		"internal_port":     internalPort,
@@ -692,7 +716,15 @@ func writeTestContractWithAuth(t *testing.T, dir string, port, internalPort, dra
 		"health_timeout_ms": 8000,
 		"drain_timeout_ms":  drainTimeoutMs,
 		"agent_auth":        authMode,
-	}
+	})
+}
+
+// writeContract writes an arbitrary config, for tests that need a field the
+// typed helpers do not offer. The helpers above are the common shapes; this is
+// the escape hatch, and it exists so that adding one unusual test does not mean
+// adding one more parameter to a helper every other test also calls.
+func writeContract(t *testing.T, dir string, contract map[string]any) string {
+	t.Helper()
 
 	data, err := json.MarshalIndent(contract, "", "  ")
 	if err != nil {
@@ -703,7 +735,6 @@ func writeTestContractWithAuth(t *testing.T, dir string, port, internalPort, dra
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatalf("writing contract: %v", err)
 	}
-
 	return path
 }
 

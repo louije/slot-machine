@@ -18,8 +18,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -143,7 +141,17 @@ func cmdStart(args []string) {
 	// could not bind its own API at all. Reserving it up front closes that window
 	// while still letting startup finish before any request is served, so a
 	// reachable API continues to mean "startup is done".
-	apiAddr := fmt.Sprintf(":%d", apiPort)
+	//
+	// Loopback, always, with no config field to widen it. POST /deploy and POST
+	// /rollback are unauthenticated by design — the CLI is a thin client over
+	// them — so the bind address is the only thing standing between a promotion
+	// and everyone else on the network. This used to be ":%d", which meant every
+	// interface, while both docs/agent.md and the spec claimed localhost.
+	//
+	// It is also the recovery path when the agent surface is unreachable: with
+	// an authenticating proxy down, `slot-machine status` and `slot-machine
+	// rollback` still work over SSH. Reach it from elsewhere with a tunnel.
+	apiAddr := fmt.Sprintf("127.0.0.1:%d", apiPort)
 	apiLn, err := net.Listen("tcp", apiAddr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot listen on %s: %v\n", apiAddr, err)
@@ -151,19 +159,28 @@ func cmdStart(args []string) {
 		os.Exit(1)
 	}
 
-	// The HMAC secret is generated per daemon session and handed to app
-	// processes, never to the agent. See docs/agent.md on why this is identity
-	// labelling rather than authentication.
-	var authSecret string
-	if cfg.AgentAuth == "hmac" {
-		secretBytes := make([]byte, 32)
-		if _, err := rand.Read(secretBytes); err != nil {
-			fmt.Fprintf(os.Stderr, "error generating auth secret: %v\n", err)
-			os.Exit(1)
+	// Say what the agent surface will and will not check, at the one moment an
+	// operator is definitely reading the output. "agent auth: header" alone
+	// invites the reading that slot-machine authenticates; it does not.
+	switch cfg.AgentAuth {
+	case "none":
+		fmt.Printf("agent auth: none — every request is treated as %q. Local development only.\n",
+			"local")
+	default:
+		fmt.Printf("agent auth: identity read from %s, set by the proxy in front\n", cfg.AgentAuthHeader)
+		switch cfg.AgentAccess {
+		case "allAuth":
+			fmt.Println("agent access: every authenticated user")
+		default:
+			fmt.Printf("agent access: decided by the app at %s on its internal port\n",
+				cfg.AgentAccessEndpoint)
 		}
-		authSecret = hex.EncodeToString(secretBytes)
 	}
-	fmt.Printf("agent auth: %s\n", cfg.AgentAuth)
+	if cfg.Listen != "127.0.0.1" && cfg.Listen != "localhost" && cfg.Listen != "::1" {
+		fmt.Printf("WARNING: listen is %q, so the identity header can be set by anything that "+
+			"can reach this host. Only do this when the authenticating proxy is elsewhere and "+
+			"the path to it is protected.\n", cfg.Listen)
+	}
 	reportAgentCredentials()
 
 	st, err := store.Open(filepath.Join(*dataDir, "agent.db"))
@@ -200,6 +217,12 @@ func cmdStart(args []string) {
 		}
 	}
 
+	// Declared before the agent service so the service can ask it which app is
+	// live, and assigned below so the orchestrator can mount the service on the
+	// public port. The cycle is only in the wiring: the closure runs when a
+	// request arrives, long after both exist.
+	var o *orchestrator.Orchestrator
+
 	svc := agent.NewService(agent.Options{
 		Store:          st,
 		Manager:        mgr,
@@ -208,7 +231,15 @@ func cmdStart(args []string) {
 		DataDir:        *dataDir,
 		ConfigPath:     *configPath,
 		AuthMode:       cfg.AgentAuth,
-		AuthSecret:     authSecret,
+		AuthHeader:     cfg.AgentAuthHeader,
+		AccessMode:     cfg.AgentAccess,
+		AccessEndpoint: cfg.AgentAccessEndpoint,
+		LivePort: func() int {
+			if o == nil {
+				return 0
+			}
+			return o.LiveInternalPort()
+		},
 		AllowedTools:   cfg.AgentAllowedTools,
 		DeniedCommands: cfg.AgentDeniedCommands,
 		Model:          cfg.AgentModel,
@@ -232,12 +263,11 @@ func cmdStart(args []string) {
 		},
 	})
 
-	o := orchestrator.New(orchestrator.Options{
-		Config:     cfg,
-		RepoDir:    absRepo,
-		DataDir:    *dataDir,
-		AuthSecret: authSecret,
-		Intercept:  svc,
+	o = orchestrator.New(orchestrator.Options{
+		Config:    cfg,
+		RepoDir:   absRepo,
+		DataDir:   *dataDir,
+		Intercept: svc,
 	})
 
 	o.WarnSharedDirs()

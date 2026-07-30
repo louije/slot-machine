@@ -20,9 +20,11 @@ func (a *Service) handleChatConfig(w http.ResponseWriter, r *http.Request) {
 	if title == "" {
 		title = "slot-machine"
 	}
+	// No secret here any more, and no way to reintroduce one: the browser is
+	// never asked to prove anything, so it needs nothing to prove it with. The
+	// identity arrives from the proxy on every request, including this one.
 	writeJSON(w, 200, map[string]string{
 		"authMode":   a.authMode,
-		"authSecret": a.authSecret,
 		"chatTitle":  title,
 		"chatAccent": a.chatAccent,
 	})

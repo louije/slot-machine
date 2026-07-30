@@ -26,10 +26,16 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
 
 // envInt reads an integer from an environment variable, returning 0 if unset.
 func envInt(key string) int {
@@ -94,6 +100,36 @@ func main() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			fmt.Fprint(w, "unhealthy")
 		}
+	})
+
+	// GET /_slot_machine/access — who may use the agent.
+	//
+	// The app is the authority: slot-machine knows who you are because a proxy
+	// told it, but only the app knows whether you are allowed. This double
+	// answers from the identity header alone, which is enough to cover every
+	// verdict without inventing a user table:
+	//
+	//	"allAuth"  — nobody named; the app does not discriminate
+	//	"granted"  — a username starting with "admin"
+	//	"denied"   — anyone else
+	//
+	// Set APP_ACCESS_MODE to pin a single answer, or APP_ACCESS_BROKEN to make
+	// the endpoint fail, so a test can drive the fail-closed paths.
+	intMux.HandleFunc("/_slot_machine/access", func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv("APP_ACCESS_BROKEN") == "1" {
+			http.Error(w, "the user table is on fire", http.StatusInternalServerError)
+			return
+		}
+		if mode := os.Getenv("APP_ACCESS_MODE"); mode != "" {
+			writeJSON(w, map[string]string{"access": mode})
+			return
+		}
+		user := r.Header.Get("X-Authenticated-User")
+		access := "denied"
+		if strings.HasPrefix(user, "admin") {
+			access = "granted"
+		}
+		writeJSON(w, map[string]string{"access": access})
 	})
 
 	// POST /control/unhealthy — makes /healthz return 503.

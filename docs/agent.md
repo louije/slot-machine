@@ -499,30 +499,107 @@ default, tunable when needed.
 
 ### Network
 
-The chat UI and agent API are served through the app's public port via the
-reverse proxy intercept. They're protected by whatever protects the app —
-Tailscale, Caddy with auth, HTTP basic auth, nothing (local dev).
+Every listener binds `127.0.0.1` by default: the app's public port, the internal
+port, and the daemon's API port. The first two follow the `listen` config field;
+the API port has no field and is always loopback.
 
-The deploy/rollback/status API stays on the separate API port (9100), which
-is localhost-only. The agent calls deploy/rollback/status internally, never
-exposing them through the public port.
+**slot-machine performs no authentication.** That is not an omission to be fixed
+later — it is the design. It reads an identity that something in front of it
+established, and that read is only meaningful because nothing else can reach the
+port. The bind address is the security boundary; everything below is what
+slot-machine does with an identity it already trusts.
 
-### Auth on agent routes
+The deploy/rollback/status API on port 9100 carries no credential at all. The
+CLI (`slot-machine deploy`) is a thin HTTP client over it, and the agent uses the
+same CLI a human would, so there is no privileged internal path to secure — and
+no credential the agent could not also read. Reach it from elsewhere with an SSH
+tunnel, never by widening the bind.
 
-The proxy intercept can optionally require authentication on `/chat` and
-`/agent/*` paths. Options, in order of complexity:
+This is also the recovery path. When the proxy in front is misconfigured and the
+chat is refusing everyone, `slot-machine status` and `slot-machine rollback`
+still work over SSH.
 
-1. **None** — appropriate behind Tailscale or for local dev
-2. **Shared secret** — a token in a cookie or header, checked by slot-machine
-3. **Delegate to app** — slot-machine calls the app's auth endpoint to
-   validate the request before handling it
+### Authentication: read, never performed
 
-For v1, option 1. The system is designed for a single operator on a private
-network.
+`agent_auth` has two values:
 
-> The `hmac` mode that currently ships is **not** option 2. `/chat/config` is
-> unauthenticated and returns the secret, because the browser needs it to sign
-> — so anyone who can reach the port can mint a valid header. It labels a user;
-> it does not authenticate one. Put slot-machine behind something that actually
-> authenticates (Caddy `forward_auth`, Tailscale), and read `agent_auth` as a
-> choice of *which* header carries the already-authenticated identity.
+| Value | Behaviour |
+|---|---|
+| `header` (default) | Read `agent_auth_header` (default `X-Authenticated-User`). A request without it gets `401`, on every route including `/chat`. |
+| `none` | No identity; every request is `local`. Local development only. |
+
+Put an authenticating proxy in front. Caddy `forward_auth` to webauthn_proxy or
+oauth2-proxy, or Tailscale. Whatever it is, it must **strip the identity header
+from client input** and set it from its own result — every header slot-machine
+trusts is a header a misconfigured proxy can let a client assert.
+
+> A previous `hmac` mode signed the header with a secret that `/chat/config`
+> served, unauthenticated, to anybody who asked — the browser needed it to sign.
+> Anyone who could reach the port could mint a header for any username. It has
+> been removed rather than repaired: doing it properly means expiry, replay
+> protection and rotation, and the proxy in front already does all three. A
+> config naming `hmac` now refuses to start.
+
+### Authorization: the app decides
+
+Authentication says who you are. It does not say whether you may drive an agent
+that can commit and deploy. For anything beyond a single-operator instance those
+are different questions, and only the app can answer the second one: "admin"
+means a row in *its* database, which no identity provider knows about.
+
+So slot-machine asks it, on the app's `INTERNAL_PORT` — never the public one, so
+the question cannot be solicited from outside:
+
+```
+GET /_slot_machine/access
+X-Authenticated-User: alice@example.com
+
+→ {"access": "allAuth"}   any authenticated user; do not ask about individuals
+→ {"access": "granted"}   this user, yes
+→ {"access": "denied"}    this user, no
+```
+
+```ruby
+# An app that does not discriminate. One line, no user record touched.
+get '/_slot_machine/access' do
+  json access: 'allAuth'
+end
+
+# An app that does.
+get '/_slot_machine/access' do
+  user = User.find_by(email: request.env['HTTP_X_AUTHENTICATED_USER'])
+  json access: user&.admin? ? 'granted' : 'denied'
+end
+```
+
+The identity headers the proxy set are forwarded verbatim, including
+`X-Auth-Request-Groups` and friends, so an app can answer from an SSO group
+claim instead of its own tables. slot-machine assigns them no meaning: there is
+no group-to-permission mapping anywhere in this repository, and adding one would
+put the app's role model in two places.
+
+The caller's `Cookie` and `Authorization` headers are **not** forwarded. They
+belong to the session with the proxy and have no business reaching an internal
+endpoint.
+
+Set `agent_access: "allAuth"` to skip the call entirely, for an app you cannot
+modify.
+
+#### Everything that is not a clean yes is a no
+
+| Situation | Result |
+|---|---|
+| `{"access":"granted"}` or `"allAuth"` | allowed |
+| `{"access":"denied"}` | `403` — a decision about you |
+| Endpoint returns `404` | `503`, naming the endpoint to implement |
+| App errors, times out, redirects, or returns anything unparseable | `503` |
+| **No app is live** | `503` |
+
+The last row is the one to understand before deploying this. With no live app
+there is no authority to ask, and granting access in that state would mean a
+failed deploy widens who can use the agent — in the state nobody is watching. So
+a fresh box has no chat until its first successful deploy, and a totally broken
+app has no chat until it is fixed. Fix it over SSH; the API port is still there.
+
+`403` and `503` are kept distinct on purpose. A `403` says the app considered you
+and declined. A `503` says nothing was decided, and points at the app.
