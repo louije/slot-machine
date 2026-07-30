@@ -37,6 +37,8 @@ type DeployResponse struct {
 	Slot           string `json:"slot"`
 	Commit         string `json:"commit"`
 	PreviousCommit string `json:"previous_commit"`
+	Stage          string `json:"stage"`
+	Error          string `json:"error"`
 }
 
 // RollbackResponse matches the JSON returned by POST /rollback.
@@ -53,6 +55,9 @@ type StatusResponse struct {
 	PreviousSlot   string `json:"previous_slot"`
 	PreviousCommit string `json:"previous_commit"`
 	StagingDir     string `json:"staging_dir"`
+	MachineDir     string `json:"machine_dir"`
+	MachineBranch  string `json:"machine_branch"`
+	MachineCommit  string `json:"machine_commit"`
 	LastDeployTime string `json:"last_deploy_time"`
 	Healthy        bool   `json:"healthy"`
 }

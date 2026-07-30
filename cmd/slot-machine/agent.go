@@ -12,32 +12,43 @@ import (
 )
 
 type agentService struct {
-	store        *agentStore
-	manager      *agentManager
-	agentBin     string
-	stagingDir   string
-	configPath   string
-	dataDir      string
-	envFunc      func() []string
-	authMode     string   // "hmac", "trusted", "none"
-	authSecret   string   // hex-encoded HMAC secret (for "hmac" mode)
-	allowedTools []string // claude --allowed-tools
-	chatTitle    string
-	chatAccent   string
+	store   *agentStore
+	manager *agentManager
+
+	agentBin   string
+	workDir    string // the machine slot — the agent's worktree
+	repoDir    string
+	dataDir    string
+	configPath string
+	envFunc    func() []string
+
+	authMode      string // "hmac", "trusted", "none"
+	authSecret    string // hex-encoded HMAC secret (for "hmac" mode)
+	allowedTools  []string
+	model         string
+	timeout       time.Duration
+	machineBranch string
+	humanBranch   string
+	chatTitle     string
+	chatAccent    string
 }
 
 var titlePattern = regexp.MustCompile(`\[\[TITLE:\s*(.+?)\]\]`)
 
+// streamKeepalive bounds how long an SSE connection can sit silent. Agents can
+// think for a long time between events, and an intermediary that sees nothing
+// may close the connection.
+const streamKeepalive = 15 * time.Second
+
 func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/chat" {
+	switch r.URL.Path {
+	case "/chat":
 		a.handleChat(w, r)
 		return
-	}
-	if r.URL.Path == "/chat.css" {
+	case "/chat.css":
 		a.handleChatCSS(w, r)
 		return
-	}
-	if r.URL.Path == "/chat/config" {
+	case "/chat/config":
 		a.handleChatConfig(w, r)
 		return
 	}
@@ -71,7 +82,14 @@ func (a *agentService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	parts := strings.SplitN(rest, "/", 2)
 	convID := parts[0]
 	if len(parts) == 1 {
-		a.handleGetConversation(w, r, convID)
+		switch r.Method {
+		case "GET":
+			a.handleGetConversation(w, r, convID)
+		case "DELETE":
+			a.handleDeleteConversation(w, r, convID)
+		default:
+			http.Error(w, "method not allowed", 405)
+		}
 		return
 	}
 	switch parts[1] {
@@ -144,6 +162,18 @@ func (a *agentService) handleGetConversation(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+func (a *agentService) handleDeleteConversation(w http.ResponseWriter, r *http.Request, convID string) {
+	if a.manager.isPending(convID) {
+		writeJSON(w, 409, map[string]string{"error": "agent is still working on this conversation"})
+		return
+	}
+	if err := a.store.deleteConversation(convID); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.WriteHeader(204)
+}
+
 func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request, convID string) {
 	if r.Method != "POST" {
 		http.Error(w, "method not allowed", 405)
@@ -157,6 +187,10 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "bad request", 400)
 		return
 	}
+	if strings.TrimSpace(msg.Content) == "" {
+		http.Error(w, "empty message", 400)
+		return
+	}
 
 	conv, err := a.store.getConversation(convID)
 	if err != nil {
@@ -168,48 +202,48 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	a.store.addMessage(convID, "user", msg.Content)
-
-	// Generate deny rules before spawning agent.
-	a.generateDenySettings()
-
-	// Build agent invocation.
-	bin := a.agentBin
-	if bin == "" {
-		bin = "claude"
-	}
-	tools := a.allowedTools
-	if len(tools) == 0 {
-		tools = []string{"Bash", "Edit", "Read", "Write", "Glob", "Grep"}
-	}
-	args := []string{
-		"--output-format", "stream-json",
-		"--verbose",
-		"--allowed-tools", strings.Join(tools, ","),
-		"-p", msg.Content,
-		"--system-prompt", a.buildSystemPrompt(),
-	}
-	if conv.SessionID != "" {
-		args = append(args, "--resume", conv.SessionID)
+	// Refuse before storing, so a rejected message does not sit in the
+	// transcript looking like it was accepted.
+	work := agentWork{
+		convID:       convID,
+		prompt:       msg.Content,
+		sessionID:    conv.SessionID,
+		bin:          a.resolveBin(),
+		dir:          a.workDir,
+		env:          a.buildAgentEnv(),
+		allowedTools: a.allowedTools,
+		model:        a.model,
+		systemPrompt: a.buildSystemPrompt(),
+		timeout:      a.timeout,
 	}
 
-	env := a.buildAgentEnv()
+	if _, err := a.store.addMessage(convID, "user", msg.Content); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 
-	err = a.manager.enqueue(agentWork{
-		convID:    convID,
-		message:   msg.Content,
-		sessionID: conv.SessionID,
-		bin:       bin,
-		args:      args,
-		dir:       a.stagingDir,
-		env:       env,
-	})
-	if err != nil {
+	// Deny rules are regenerated per turn: the agent has a shell in this
+	// directory and could remove them, and a fresh copy each turn bounds that to
+	// a single turn.
+	if err := a.generateDenySettings(); err != nil {
+		logf("agent: writing deny settings: %v", err)
+	}
+
+	if err := a.manager.enqueue(work); err != nil {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
 
-	w.WriteHeader(200)
+	writeJSON(w, 200, map[string]any{
+		"queued": a.manager.activeConv() != convID,
+	})
+}
+
+func (a *agentService) resolveBin() string {
+	if a.agentBin != "" {
+		return a.agentBin
+	}
+	return "claude"
 }
 
 func (a *agentService) buildAgentEnv() []string {
@@ -249,6 +283,13 @@ func (a *agentService) handleCancel(w http.ResponseWriter, r *http.Request, conv
 	w.WriteHeader(200)
 }
 
+// handleStream serves the conversation as SSE.
+//
+// The loop grabs the manager's broadcast channel *before* reading messages, so
+// an event landing between the read and the wait cannot be missed. It follows a
+// conversation that is queued as well as one that is running — with a shared
+// agent slot, waiting for your turn is a normal state and the stream should stay
+// open through it.
 func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, convID string) {
 	conv, err := a.store.getConversation(convID)
 	if err != nil {
@@ -269,11 +310,12 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(200)
 	flusher.Flush()
 
-	// Replay missed events. Accept Last-Event-ID header (auto-reconnect)
-	// or ?after= query param (initial connect with known offset).
+	// Replay missed events. Last-Event-ID covers EventSource's automatic
+	// reconnect; ?after= covers a first connect with a known offset.
 	var afterID int64
 	if lastID := r.Header.Get("Last-Event-ID"); lastID != "" {
 		fmt.Sscanf(lastID, "%d", &afterID)
@@ -281,78 +323,41 @@ func (a *agentService) handleStream(w http.ResponseWriter, r *http.Request, conv
 		fmt.Sscanf(after, "%d", &afterID)
 	}
 
-	msgs, _ := a.store.getMessages(convID, afterID)
-	for _, m := range msgs {
-		fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", m.ID, m.Type, m.Content)
-		afterID = m.ID
-	}
-	flusher.Flush()
-
-	// Subscribe to live broadcast if agent is running.
-	ra := a.manager.getRunning(convID)
-	if ra == nil {
-		fmt.Fprintf(w, "event: status\ndata: {\"status\":%q}\n\n", conv.Status)
-		flusher.Flush()
-		return
-	}
-
-	// Live subscription loop with ticker-based wakeup.
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-				ra.cond.Broadcast()
-			case <-ra.done:
-				ra.cond.Broadcast()
-				return
-			}
-		}
-	}()
-
-	ra.mu.Lock()
-	lastSeq := ra.eventSeq
-	ra.mu.Unlock()
-
 	for {
-		if r.Context().Err() != nil {
-			return
-		}
+		events := a.manager.events()
 
-		ra.mu.Lock()
-		for ra.eventSeq == lastSeq && r.Context().Err() == nil {
-			ra.cond.Wait()
+		msgs, err := a.store.getMessages(convID, afterID)
+		if err != nil {
+			logf("stream: reading messages for %s: %v", convID, err)
 		}
-		lastSeq = ra.eventSeq
-		ra.mu.Unlock()
-
-		if r.Context().Err() != nil {
-			return
-		}
-
-		newMsgs, _ := a.store.getMessages(convID, afterID)
-		for _, msg := range newMsgs {
-			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", msg.ID, msg.Type, msg.Content)
-			afterID = msg.ID
+		for _, m := range msgs {
+			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", m.ID, m.Type, m.Content)
+			afterID = m.ID
 		}
 		flusher.Flush()
 
-		select {
-		case <-ra.done:
-			finalMsgs, _ := a.store.getMessages(convID, afterID)
-			for _, msg := range finalMsgs {
-				fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", msg.ID, msg.Type, msg.Content)
-			}
-			conv, _ := a.store.getConversation(convID)
-			status := "idle"
-			if conv != nil {
-				status = conv.Status
-			}
+		conv, err := a.store.getConversation(convID)
+		if err != nil {
+			logf("stream: reading conversation %s: %v", convID, err)
+		}
+		status := "idle"
+		if conv != nil {
+			status = conv.Status
+		}
+		if status != "running" && status != "queued" && !a.manager.isPending(convID) {
 			fmt.Fprintf(w, "event: status\ndata: {\"status\":%q}\n\n", status)
 			flusher.Flush()
 			return
-		default:
+		}
+
+		select {
+		case <-events:
+		case <-r.Context().Done():
+			return
+		case <-time.After(streamKeepalive):
+			// SSE comment: keeps intermediaries from timing out a quiet stream.
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
 		}
 	}
 }

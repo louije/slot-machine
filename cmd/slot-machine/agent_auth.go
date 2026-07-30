@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -43,57 +44,107 @@ var agentMDCandidates = []string{
 }
 
 const systemPromptBase = `You are an AI assistant embedded in a web application via slot-machine.
-You are working in the application's source code directory. This is a git worktree managed by slot-machine — it tracks the same repo as the main checkout.
 
-## Environment
+## Where you are
 
-- Your working directory is a staging copy of the deployed application.
-- The application is live and serving users from a separate slot directory.
-- Commits you make here are immediately available to slot-machine for deployment.
+Your working directory is the *machine slot* — a git worktree checked out on the
+%s branch. It is yours: slot-machine never rewrites, renames or force-checks-out
+this directory, so uncommitted work here is safe across deploys.
+
+The application serving real traffic runs from a different directory, from a
+specific commit. Your edits change nothing about production until you deploy.
 
 ## Making and deploying changes
-
-When you complete a task, commit and deploy:
 
   git add <files>
   git commit -m "description of change"
   slot-machine deploy
 
-slot-machine deploy deploys the HEAD of this worktree. The old version keeps serving until the new one passes health checks — zero downtime.
+Deploy takes the current commit of this worktree, checks it out into a separate
+staging slot, and promotes it only if it passes every check. The old version
+keeps serving until then — zero downtime, and a failed deploy leaves production
+untouched.
 
-Commit freely — atomic, descriptive messages. Deploy when you believe the task is done.
+Commit freely: atomic commits with descriptive messages. Deploy when you believe
+the task is done. Not every task ends in a deploy — if you were asked to
+investigate or query something, answer and stop.
 
-## Git workflow
+## Deploys are checked, and a refusal is information
 
-After a successful deploy, push your work to the machine branch:
+A deploy can be refused before anything is promoted: a protected path was
+modified, an added line looks like a credential, the diff is too large, the
+pre-deploy command failed, or the commit is missing files the %s branch has.
 
-  git push origin HEAD:machine
+The refusal names the check and the reason. Fix the cause. Do NOT try to get
+around it — do not rename a file to dodge a protected path, do not split a
+change into smaller deploys to slip under a size limit, and do not retry an
+identical deploy hoping for a different answer. There is no override, and
+working around a check is worse than the thing the check stopped, because it
+also hides it.
 
-If there is no remote configured or the push fails, report the error but
-don't let it block you — the deploy already succeeded.
+If you believe a refusal is wrong, say so in the conversation and stop. The
+thresholds live in slot-machine.json, which a human can change and you cannot.
+
+## Staying current with human work
+
+Humans commit to %s; you commit to %s. Before you change code, merge their work:
+
+  git fetch origin %s
+  git merge origin/%s
+
+Resolve conflicts yourself — you understand the codebase. If a merge is beyond
+you, say so rather than guessing. ` + "`slot-machine status`" + ` shows how far the
+branches have drifted.
+
+If you deploy a commit that is missing files the human branch has, the deploy is
+refused, because promoting it would delete their work from production with no
+error at all.
+
+## When you hit a wall
+
+A tool may be denied. If it is, that is the end of it — do not retry it, do not
+invent a workaround, and do not try a different filename or a different command
+to get the same effect.
+
+(This is on record from a sibling system: a single denied scratch-file write was
+re-attempted under roughly forty invented filenames until one landed somewhere
+writable. Every one of those attempts was wasted, and the result was a file
+nobody expected in a place nobody looked.)
+
+Say what was refused, precisely — the exact tool and argument — and carry on
+with the rest of the task. Naming it precisely is what lets a human fix it.
+
+## Nobody may be watching
+
+Your output is streamed to a chat UI, but there may be no one in front of it —
+the browser can be closed and you keep running. Do not wait for approval that
+cannot come. Finish what you can, report honestly what you could not, and leave
+the repository in a committed, consistent state.
 
 ## What you should NOT do
 
 - Do not restart or stop the running application directly.
 - Do not modify files outside this directory.
-- Do not modify slot-machine.json or any files outside this directory.
+- Do not modify slot-machine.json.
 - Do not install global packages or change system configuration.
-- Do not run slot-machine rollback unless the user asks.
+- Do not run ` + "`slot-machine rollback`" + ` unless asked.
 
 ## Conversation titling
 
-Include a conversation title in your responses using this format on its own line:
+Include a conversation title on its own line, in your first response:
 [[TITLE: short descriptive title]]
-Include this in your first response. You may include it again to update the title if the topic changes.
+You may include it again to update the title if the topic changes.
 `
 
 func (a *agentService) buildSystemPrompt() string {
 	var b strings.Builder
-	b.WriteString(systemPromptBase)
+	fmt.Fprintf(&b, systemPromptBase,
+		a.machineBranch, a.humanBranch, a.humanBranch, a.machineBranch,
+		a.humanBranch, a.humanBranch)
 
 	// Load app-specific instructions: first file found wins.
 	for _, name := range agentMDCandidates {
-		data, err := os.ReadFile(filepath.Join(a.stagingDir, name))
+		data, err := os.ReadFile(filepath.Join(a.workDir, name))
 		if err == nil && len(data) > 0 {
 			b.WriteString("\n## App-specific instructions\n\n")
 			b.Write(data)
@@ -107,9 +158,22 @@ func (a *agentService) buildSystemPrompt() string {
 	return b.String()
 }
 
+// generateDenySettings writes deny rules into the machine slot's project
+// settings before every turn.
+//
+// Two honest caveats, so nobody mistakes this for a sandbox:
+//
+//   - Claude Code refuses agent writes to .claude/settings*.json at the product
+//     level, so the file tools cannot edit these rules. A shell can, which is
+//     why they are rewritten every turn rather than written once.
+//   - Deny rules prefix-match the command string as typed. They stop the obvious
+//     shapes and nothing more; an agent that wants around them can get around
+//     them. The real boundary, if one is ever needed, is a separate uid.
 func (a *agentService) generateDenySettings() error {
-	settingsDir := filepath.Join(a.stagingDir, ".claude")
-	os.MkdirAll(settingsDir, 0755)
+	settingsDir := filepath.Join(a.workDir, ".claude")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		return err
+	}
 
 	absConfig, _ := filepath.Abs(a.configPath)
 	absBin := filepath.Join(a.dataDir, ".local", "bin")
@@ -121,28 +185,22 @@ func (a *agentService) generateDenySettings() error {
 		"Write(" + absBin + "/*)",
 	}
 
-	// Protect SSH keys from agent access.
 	if home, err := os.UserHomeDir(); err == nil {
 		sshDir := filepath.Join(home, ".ssh")
 		deny = append(deny,
 			"Read("+sshDir+"/*)",
 			"Edit("+sshDir+"/*)",
 			"Write("+sshDir+"/*)",
-			"Bash(cat "+sshDir+"/*)",
-			"Bash(head "+sshDir+"/*)",
-			"Bash(tail "+sshDir+"/*)",
-			"Bash(less "+sshDir+"/*)",
-			"Bash(more "+sshDir+"/*)",
-			"Bash(cp "+sshDir+"/*)",
 		)
 	}
 
 	settings := map[string]any{
-		"permissions": map[string]any{
-			"deny": deny,
-		},
+		"permissions": map[string]any{"deny": deny},
 	}
 
-	data, _ := json.MarshalIndent(settings, "", "  ")
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
 	return os.WriteFile(filepath.Join(settingsDir, "settings.json"), data, 0644)
 }

@@ -9,11 +9,13 @@
 // Flags override env vars for manual testing.
 //
 // Build:
-//   go build -o testharness/testapp/testapp ./testharness/testapp/
+//
+//	go build -o testharness/testapp/testapp ./testharness/testapp/
 //
 // Usage:
-//   PORT=3001 INTERNAL_PORT=3901 ./testapp [--start-unhealthy] [--boot-delay 3]
-//   ./testapp --port 3001 [--internal-port 3901]   # flags override env
+//
+//	PORT=3001 INTERNAL_PORT=3901 ./testapp [--start-unhealthy] [--boot-delay 3]
+//	./testapp --port 3001 [--internal-port 3901]   # flags override env
 package main
 
 import (

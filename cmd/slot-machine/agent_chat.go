@@ -30,7 +30,7 @@ func (a *agentService) handleChatConfig(w http.ResponseWriter, r *http.Request) 
 
 func (a *agentService) handleChatCSS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/css")
-	data, err := os.ReadFile(filepath.Join(a.stagingDir, "chat.css"))
+	data, err := os.ReadFile(filepath.Join(a.workDir, "chat.css"))
 	if err != nil {
 		w.WriteHeader(200)
 		return

@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -22,18 +23,64 @@ func emit(v any) {
 	fmt.Fprintln(os.Stdout, string(data))
 }
 
+// Every flag slot-machine passes must be declared here, even the ones this
+// double ignores. Go's flag package exits 2 on an unknown flag, so a flag added
+// to the real invocation and not mirrored here turns the double into a process
+// that prints usage and dies — which is exactly what happened when --verbose was
+// added: three agent spec tests failed for months with no output to explain it.
+//
+// If you add a flag in buildAgentArgs, add it here in the same commit.
 func main() {
 	_ = flag.String("output-format", "", "output format (ignored, always stream-json)")
+	_ = flag.Bool("verbose", false, "verbose output")
 	prompt := flag.String("p", "", "prompt")
 	resume := flag.String("resume", "", "session ID to resume")
+	_ = flag.String("session-id", "", "session ID for a fresh session")
 	_ = flag.String("cwd", "", "working directory")
-	_ = flag.String("system-prompt", "", "system prompt")
+	_ = flag.String("model", "", "model")
+	_ = flag.String("system-prompt", "", "system prompt (replaces the built-in)")
+	_ = flag.String("append-system-prompt", "", "system prompt (appended)")
 	_ = flag.String("allowedTools", "", "allowed tools")
 	_ = flag.String("allowed-tools", "", "allowed tools (alt form)")
+	_ = flag.String("disallowedTools", "", "disallowed tools")
+	_ = flag.String("permission-mode", "", "permission mode")
+	_ = flag.String("settings", "", "settings file")
 	_ = flag.Bool("dangerously-skip-permissions", false, "bypass permissions")
 	interval := flag.Int("interval", 200, "milliseconds between events")
 	duration := flag.Int("duration", 10, "number of events to emit")
-	flag.Parse()
+
+	// slot-machine passes the prompt as `-p -- <text>` so a message beginning
+	// with "-" is not parsed as a flag. The real CLI treats the bare "--" as
+	// end-of-flags and takes the rest verbatim; Go's flag package does not — it
+	// consumes "--" as -p's value and then chokes on a prompt starting with "-".
+	// Pull the prompt out by hand so the double behaves like the real thing,
+	// which is the only way a test can cover that case at all.
+	args := os.Args[1:]
+	for i := 0; i+2 < len(args); i++ {
+		if args[i] == "-p" && args[i+1] == "--" {
+			*prompt = args[i+2]
+			args = append(args[:i:i], args[i+3:]...)
+			break
+		}
+	}
+	flag.CommandLine.Parse(args)
+	if *prompt == "" && flag.NArg() > 0 {
+		*prompt = flag.Arg(0)
+	}
+
+	// Behaviour switches for failure-path tests, read from the environment
+	// because the real CLI has no equivalent flags.
+	if code := os.Getenv("TESTAGENT_EXIT_CODE"); code != "" {
+		if msg := os.Getenv("TESTAGENT_STDERR"); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+		}
+		n, _ := strconv.Atoi(code)
+		os.Exit(n)
+	}
+	if d := os.Getenv("TESTAGENT_HANG_MS"); d != "" {
+		ms, _ := strconv.Atoi(d)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
 
 	sessionID := fmt.Sprintf("test-session-%d", time.Now().UnixNano())
 	if *resume != "" {

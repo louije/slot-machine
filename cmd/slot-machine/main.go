@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // Version is injected at build time via -ldflags="-X main.Version=v1.0.0".
@@ -97,22 +98,18 @@ func cmdStart(args []string) {
 		*dataDir = filepath.Join(*repoDir, ".slot-machine")
 	}
 
-	cfgData, err := os.ReadFile(*configPath)
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot read %s\n", *configPath)
-		fmt.Fprintln(os.Stderr, "run 'slot-machine init' to create it")
-		os.Exit(1)
-	}
-	var cfg config
-	if err := json.Unmarshal(cfgData, &cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "error parsing config: %v\n", err)
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "error: cannot read %s\n", *configPath)
+			fmt.Fprintln(os.Stderr, "run 'slot-machine init' to create it")
+		} else {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 
-	apiPort := 9100
-	if cfg.APIPort != 0 {
-		apiPort = cfg.APIPort
-	}
+	apiPort := cfg.APIPort
 	if *port != 0 {
 		apiPort = *port
 	}
@@ -166,8 +163,13 @@ func cmdStart(args []string) {
 
 	mgr := newAgentManager(store)
 
-	if n, err := store.recoverInterrupted(); err == nil && n > 0 {
-		fmt.Printf("recovered %d interrupted agent sessions\n", n)
+	// Reconcile the database with reality before accepting work: an agent
+	// process that outlived the previous daemon is still holding the machine
+	// slot and can still commit and deploy from it.
+	if n, err := mgr.reapOrphans(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not recover agent sessions: %v\n", err)
+	} else if n > 0 {
+		fmt.Printf("recovered %d interrupted agent session(s)\n", n)
 	}
 
 	agentBin := resolveClaude(*dataDir)
@@ -184,17 +186,22 @@ func cmdStart(args []string) {
 	}
 
 	agent := &agentService{
-		store:        store,
-		manager:      mgr,
-		agentBin:     agentBin,
-		stagingDir:   filepath.Join(*dataDir, "slot-staging"),
-		configPath:   *configPath,
-		dataDir:      *dataDir,
-		authMode:     authMode,
-		authSecret:   authSecret,
-		allowedTools: cfg.AgentAllowedTools,
-		chatTitle:    cfg.ChatTitle,
-		chatAccent:   cfg.ChatAccent,
+		store:         store,
+		manager:       mgr,
+		agentBin:      agentBin,
+		workDir:       filepath.Join(*dataDir, machineSlotName),
+		repoDir:       absRepo,
+		configPath:    *configPath,
+		dataDir:       *dataDir,
+		authMode:      authMode,
+		authSecret:    authSecret,
+		allowedTools:  cfg.AgentAllowedTools,
+		model:         cfg.AgentModel,
+		timeout:       time.Duration(cfg.AgentTimeoutS) * time.Second,
+		machineBranch: cfg.MachineBranch,
+		humanBranch:   cfg.HumanBranch,
+		chatTitle:     cfg.ChatTitle,
+		chatAccent:    cfg.ChatAccent,
 		envFunc: func() []string {
 			env := os.Environ()
 			if cfg.EnvFile != "" {
@@ -217,6 +224,16 @@ func cmdStart(args []string) {
 		authSecret: authSecret,
 		appProxy:   newDynamicProxy(appProxyAddr, agent),
 		intProxy:   newDynamicProxy(intProxyAddr, nil),
+	}
+
+	// The agent's worktree. Created once and never rewritten by the daemon, so
+	// it survives deploys and restarts with its dependencies and any
+	// uncommitted work intact.
+	if err := o.ensureMachineSlot(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		fmt.Fprintln(os.Stderr, "the chat agent will not be able to work until this is resolved")
+	} else {
+		fmt.Printf("machine slot: %s (branch %s)\n", o.machineDir(), cfg.MachineBranch)
 	}
 
 	// Recover state from symlinks, or auto-deploy HEAD.
@@ -427,13 +444,6 @@ func cmdInstall() {
 		fmt.Printf("add this to your shell profile:\n")
 		fmt.Printf("  export PATH=\"%s:$PATH\"\n", destDir)
 	}
-}
-
-func shortHash(s string) string {
-	if len(s) > 8 {
-		return s[:8]
-	}
-	return s
 }
 
 func readAPIPort() int {

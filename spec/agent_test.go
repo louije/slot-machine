@@ -2,13 +2,13 @@
 //
 // These validate two architectural claims from agent.md:
 //
-// 1. Proxy intercept: the reverse proxy handles /agent/* and /chat paths
-//    internally (slot-machine serves them), forwarding everything else to
-//    the app. Same origin, same port, no CORS.
+//  1. Proxy intercept: the reverse proxy handles /agent/* and /chat paths
+//     internally (slot-machine serves them), forwarding everything else to
+//     the app. Same origin, same port, no CORS.
 //
-// 2. Deploy-through: the agent process is a child of slot-machine, not the
-//    app. When the app is swapped during a deploy, the agent keeps running
-//    and the SSE connection through the proxy stays connected.
+//  2. Deploy-through: the agent process is a child of slot-machine, not the
+//     app. When the app is swapped during a deploy, the agent keeps running
+//     and the SSE connection through the proxy stays connected.
 package spec
 
 import (
@@ -516,7 +516,9 @@ func TestToolEventsForwardedThroughSSE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating conversation: %v", err)
 	}
-	var conv struct{ ID string `json:"id"` }
+	var conv struct {
+		ID string `json:"id"`
+	}
 	json.NewDecoder(resp.Body).Decode(&conv)
 	resp.Body.Close()
 

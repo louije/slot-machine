@@ -1048,8 +1048,16 @@ func TestDeployShortHash(t *testing.T) {
 		t.Fatal("deploy with short hash failed")
 	}
 
-	// Slot name should use the short hash, not panic.
-	expectedSlot := fmt.Sprintf("slot-%s", shortCommit)
+	// The commit is resolved to its full hash before anything else happens, so
+	// a slot is named by its commit rather than by however the caller spelled
+	// it. Naming the slot from the raw input meant the same commit could land in
+	// two differently-named slots depending on whether you passed 7 characters
+	// or 40, which then made the re-deploy and rollback paths disagree about
+	// what was already on disk.
+	if dr.Commit != repo.CommitA {
+		t.Fatalf("commit = %q, want the resolved full hash %q", dr.Commit, repo.CommitA)
+	}
+	expectedSlot := fmt.Sprintf("slot-%s", repo.CommitA[:8])
 	if dr.Slot != expectedSlot {
 		t.Fatalf("slot = %q, want %q", dr.Slot, expectedSlot)
 	}
