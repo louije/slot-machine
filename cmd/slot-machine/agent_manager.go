@@ -24,6 +24,7 @@ type agentWork struct {
 	dir          string
 	env          []string
 	allowedTools []string
+	settingsPath string
 	model        string
 	systemPrompt string
 	timeout      time.Duration
@@ -292,6 +293,13 @@ func buildAgentArgs(work agentWork, resume bool) []string {
 	}
 
 	args = append(args, "--allowed-tools", strings.Join(tools, ","))
+
+	// Tool policy from outside the agent's worktree. --settings only ever adds
+	// to the project settings, so `deny` is the only direction that restricts —
+	// which is exactly what this file carries.
+	if work.settingsPath != "" {
+		args = append(args, "--settings", work.settingsPath)
+	}
 
 	// Append rather than replace: --system-prompt discards the CLI's own tool
 	// guidance, which is not ours to throw away. We are adding context, not

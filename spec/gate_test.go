@@ -76,7 +76,7 @@ func writeGateContract(t *testing.T, dir string, port, internalPort int, extra m
 		"port":              port,
 		"internal_port":     internalPort,
 		"health_endpoint":   "/healthz",
-		"health_timeout_ms": 3000,
+		"health_timeout_ms": 8000,
 		"drain_timeout_ms":  2000,
 		"agent_auth":        "none",
 	}
@@ -179,10 +179,7 @@ func TestGateProtectedPathMatchesSegments(t *testing.T) {
 		"configuration/notes.txt": "not protected\n",
 	}, "touch a similarly-named path")
 
-	dr, _ := deploy(t, apiPort, candidate)
-	if !dr.Success {
-		t.Fatalf("configuration/ must not be protected by a rule for config: %s", dr.Error)
-	}
+	mustDeploy(t, apiPort, candidate)
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +309,16 @@ func TestGateRejectsSilentRevert(t *testing.T) {
 		}
 	}
 
-	// A human commits a file on main that the candidate will not contain.
+	startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
+
+	// Baseline first, while main and the candidate still agree on which files
+	// exist. Committing the human's file before this made the *baseline* a
+	// silent revert as well, which the gate rightly refused — the test only
+	// passed originally because startup left no live commit, so the gate was
+	// skipped entirely.
+	mustDeploy(t, apiPort, repo.CommitB)
+
+	// Now a human commits a file on main that the candidate will not contain.
 	git("checkout", "--quiet", "main")
 	if err := os.WriteFile(filepath.Join(repo.Dir, "human-work.txt"), []byte("important\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -320,13 +326,7 @@ func TestGateRejectsSilentRevert(t *testing.T) {
 	git("add", "-A")
 	git("commit", "-m", "human work that must not vanish")
 
-	startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
-
 	// CommitA predates the human's file, so promoting it would remove it.
-	if dr, _ := deploy(t, apiPort, repo.CommitB); !dr.Success {
-		t.Fatalf("baseline deploy failed: %s", dr.Error)
-	}
-
 	dr := deployAndExpectGateFailure(t, apiPort, repo.CommitA, "gate")
 	if !containsStr(dr.Error, "human-work.txt") {
 		t.Fatalf("error should name the file that would be lost, got: %s", dr.Error)

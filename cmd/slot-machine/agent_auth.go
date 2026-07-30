@@ -4,7 +4,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -136,6 +135,25 @@ Include a conversation title on its own line, in your first response:
 You may include it again to update the title if the topic changes.
 `
 
+// maxInstructionBytes caps the app-specific instructions folded into the system
+// prompt.
+//
+// The prompt is passed as a single command-line argument, and Linux limits one
+// argument to MAX_ARG_STRLEN — 32 pages, 128 KiB — regardless of how much total
+// argv space is available. An app whose CLAUDE.md grew past that would not get a
+// truncated prompt, it would get E2BIG and no agent at all. 64 KiB leaves ample
+// room for the base prompt and is far larger than any instruction file that is
+// still useful to an agent.
+const maxInstructionBytes = 64 * 1024
+
+// buildSystemPrompt assembles slot-machine's own context plus the app's
+// instruction file.
+//
+// Note for operators: this ends up in the agent process's argv, so it is visible
+// in `ps` to any local user. That is not a new exposure — the agent already
+// receives the app's environment, secrets included — but it is worth knowing
+// before putting anything in CLAUDE.md that you would not put in a process
+// listing.
 func (a *agentService) buildSystemPrompt() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, systemPromptBase,
@@ -145,62 +163,24 @@ func (a *agentService) buildSystemPrompt() string {
 	// Load app-specific instructions: first file found wins.
 	for _, name := range agentMDCandidates {
 		data, err := os.ReadFile(filepath.Join(a.workDir, name))
-		if err == nil && len(data) > 0 {
-			b.WriteString("\n## App-specific instructions\n\n")
-			b.Write(data)
-			if data[len(data)-1] != '\n' {
-				b.WriteString("\n")
-			}
-			break
+		if err != nil || len(data) == 0 {
+			continue
 		}
+
+		if len(data) > maxInstructionBytes {
+			logf("agent: %s is %d bytes; using the first %d and ignoring the rest "+
+				"(the system prompt is one command-line argument and cannot exceed the OS limit)",
+				name, len(data), maxInstructionBytes)
+			data = data[:maxInstructionBytes]
+		}
+
+		b.WriteString("\n## App-specific instructions\n\n")
+		b.Write(data)
+		if data[len(data)-1] != '\n' {
+			b.WriteString("\n")
+		}
+		break
 	}
 
 	return b.String()
-}
-
-// generateDenySettings writes deny rules into the machine slot's project
-// settings before every turn.
-//
-// Two honest caveats, so nobody mistakes this for a sandbox:
-//
-//   - Claude Code refuses agent writes to .claude/settings*.json at the product
-//     level, so the file tools cannot edit these rules. A shell can, which is
-//     why they are rewritten every turn rather than written once.
-//   - Deny rules prefix-match the command string as typed. They stop the obvious
-//     shapes and nothing more; an agent that wants around them can get around
-//     them. The real boundary, if one is ever needed, is a separate uid.
-func (a *agentService) generateDenySettings() error {
-	settingsDir := filepath.Join(a.workDir, ".claude")
-	if err := os.MkdirAll(settingsDir, 0755); err != nil {
-		return err
-	}
-
-	absConfig, _ := filepath.Abs(a.configPath)
-	absBin := filepath.Join(a.dataDir, ".local", "bin")
-
-	deny := []string{
-		"Edit(" + absConfig + ")",
-		"Write(" + absConfig + ")",
-		"Edit(" + absBin + "/*)",
-		"Write(" + absBin + "/*)",
-	}
-
-	if home, err := os.UserHomeDir(); err == nil {
-		sshDir := filepath.Join(home, ".ssh")
-		deny = append(deny,
-			"Read("+sshDir+"/*)",
-			"Edit("+sshDir+"/*)",
-			"Write("+sshDir+"/*)",
-		)
-	}
-
-	settings := map[string]any{
-		"permissions": map[string]any{"deny": deny},
-	}
-
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(settingsDir, "settings.json"), data, 0644)
 }

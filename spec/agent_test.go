@@ -44,10 +44,7 @@ func TestProxyForwardsAppTraffic(t *testing.T) {
 	_ = orch
 
 	// Deploy an app.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	// GET / through the proxy should be forwarded to the app.
 	code, body := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/", appPort))
@@ -84,10 +81,7 @@ func TestProxyInterceptsAgentPaths(t *testing.T) {
 	_ = orch
 
 	// Deploy so the proxy is active.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	// GET /agent/conversations through the proxy.
 	code, body := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/agent/conversations", appPort))
@@ -129,10 +123,7 @@ func TestProxyInterceptsChatPath(t *testing.T) {
 	_ = orch
 
 	// Deploy so the proxy is active.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	// GET /chat through the proxy.
 	code, body := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/chat", appPort))
@@ -191,10 +182,7 @@ func TestAgentSurvivesDeploy(t *testing.T) {
 	_ = orch
 
 	// 1. Deploy app A.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy A failed")
-	}
+	dr := mustDeploy(t, apiPort, repo.CommitA)
 
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", appPort)
 
@@ -321,10 +309,7 @@ func TestAutoTitling(t *testing.T) {
 	_ = orch
 
 	// Deploy so the agent service is active.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", appPort)
 
@@ -458,10 +443,7 @@ func TestHMACAuthRejectsUnauthenticated(t *testing.T) {
 	_ = orch
 
 	// Deploy so the proxy is active.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", appPort)
 
@@ -509,10 +491,7 @@ func TestToolEventsForwardedThroughSSE(t *testing.T) {
 	orch := startOrchestratorWithAgent(t, bin, contract, repo.Dir, apiPort, agentBin, release)
 	_ = orch
 
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", appPort)
 
@@ -643,10 +622,7 @@ func TestChatPageServesFullHTML(t *testing.T) {
 	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	code, body := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/chat", appPort))
 	if code != 200 {

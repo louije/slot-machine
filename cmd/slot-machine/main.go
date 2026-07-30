@@ -186,22 +186,23 @@ func cmdStart(args []string) {
 	}
 
 	agent := &agentService{
-		store:         store,
-		manager:       mgr,
-		agentBin:      agentBin,
-		workDir:       filepath.Join(*dataDir, machineSlotName),
-		repoDir:       absRepo,
-		configPath:    *configPath,
-		dataDir:       *dataDir,
-		authMode:      authMode,
-		authSecret:    authSecret,
-		allowedTools:  cfg.AgentAllowedTools,
-		model:         cfg.AgentModel,
-		timeout:       time.Duration(cfg.AgentTimeoutS) * time.Second,
-		machineBranch: cfg.MachineBranch,
-		humanBranch:   cfg.HumanBranch,
-		chatTitle:     cfg.ChatTitle,
-		chatAccent:    cfg.ChatAccent,
+		store:          store,
+		manager:        mgr,
+		agentBin:       agentBin,
+		workDir:        filepath.Join(*dataDir, machineSlotName),
+		repoDir:        absRepo,
+		configPath:     *configPath,
+		dataDir:        *dataDir,
+		authMode:       authMode,
+		authSecret:     authSecret,
+		allowedTools:   cfg.AgentAllowedTools,
+		deniedCommands: cfg.AgentDeniedCommands,
+		model:          cfg.AgentModel,
+		timeout:        time.Duration(cfg.AgentTimeoutS) * time.Second,
+		machineBranch:  cfg.MachineBranch,
+		humanBranch:    cfg.HumanBranch,
+		chatTitle:      cfg.ChatTitle,
+		chatAccent:     cfg.ChatAccent,
 		envFunc: func() []string {
 			env := os.Environ()
 			if cfg.EnvFile != "" {
@@ -225,6 +226,8 @@ func cmdStart(args []string) {
 		appProxy:   newDynamicProxy(appProxyAddr, agent),
 		intProxy:   newDynamicProxy(intProxyAddr, nil),
 	}
+
+	o.warnTrackedSharedDirs()
 
 	// The agent's worktree. Created once and never rewritten by the daemon, so
 	// it survives deploys and restarts with its dependencies and any

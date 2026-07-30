@@ -53,7 +53,10 @@ Any implementation of the orchestrator can be validated against these scenarios:
 4. Deploy twice. Verify only one previous slot is retained.
 5. Rollback with no previous slot. Verify error.
 6. Deploy while a deploy is in progress. Verify queued or rejected.
-7. Process crashes after promotion. Verify health status reflects it.
+7. Process crashes after promotion. Verify health status reflects it, and that
+   the public port keeps answering — 503, not a refused connection. A caller
+   cannot distinguish a refused connection from a machine that is gone, and
+   releasing the port lets something else claim it while the app is down.
 8. Drain timeout exceeded. Verify old process is force-killed.
 
 The spec is small enough to implement in ~500 lines of any language. The test suite validates behavior regardless of implementation.

@@ -37,6 +37,11 @@ before traffic switches. The old process drains gracefully. If the new process
 fails health checks, it's killed and the live slot stays untouched. Rollback
 is always one command away.
 
+If the live app crashes, the public port keeps answering — with `503`, not a
+refused connection. The distinction matters: a refused connection looks the same
+as a machine that has gone away, and letting go of the port invites something
+else to take it while the app is down.
+
 ## What a deploy checks
 
 Every deploy — from the agent or from your terminal — runs the same pipeline,
@@ -195,7 +200,7 @@ All fields in `slot-machine.json`:
 | `drain_timeout_ms` | `5000` | Graceful shutdown window before SIGKILL |
 | `env_file` | — | Loaded into the app's environment |
 | `api_port` | `9100` | Daemon API port (deploy/rollback/status) |
-| `shared_dirs` | `[]` | Directories symlinked across deploys (e.g. `["data", "uploads"]`) |
+| `shared_dirs` | `[]` | Directories symlinked across deploys (e.g. `["data", "uploads"]`). Must be gitignored — a tracked path fights the checkout, and slot-machine warns at startup if it finds one |
 | `agent_auth` | `hmac` | Agent auth mode (see below) |
 | `agent_allowed_tools` | Bash, Edit, Read, Write, Glob, Grep | Claude tools the agent can use |
 | `agent_model` | CLI default | `claude --model`. Unset means the run inherits the server user's `~/.claude/settings.json` |
@@ -234,7 +239,7 @@ Environment=CLAUDE_CODE_OAUTH_TOKEN=your-token-here
 CLAUDE_CODE_OAUTH_TOKEN=your-token-here
 ```
 
-### Agent tools
+### Agent tools, and what they are not
 
 Default tools: `Bash`, `Edit`, `Read`, `Write`, `Glob`, `Grep`. Add more in
 `slot-machine.json`:
@@ -245,14 +250,56 @@ Default tools: `Bash`, `Edit`, `Read`, `Write`, `Glob`, `Grep`. Add more in
 }
 ```
 
+**There is no sandbox.** The agent runs as the same user as the daemon, with a
+shell, and with the app's environment including its secrets. Read that sentence
+before deciding where to run this.
+
+What slot-machine does provide is a deny list, written to
+`.slot-machine/agent-settings.json` before every turn and passed to the CLI. It
+covers the shapes that are never a legitimate step in editing and deploying an
+app — `sudo`, `systemctl`, package managers, `rm -rf /`, `git push --force`,
+`shutdown`, and the `slot-machine` subcommands that fight the daemon — plus the
+config file, the data directory, and `~/.ssh`. Add your own:
+
+```json
+{
+  "agent_denied_commands": ["terraform", "kubectl", "psql"]
+}
+```
+
+Two limits worth understanding, because both have bitten people:
+
+- **Matching is a prefix match against the command as typed.** A rule written
+  against an expanded path never matches the tilde form the agent actually
+  types. Write rules the way a command gets written.
+- **An allow list only ever widens.** Restricting requires `deny`.
+
+So this is a guardrail against a confused agent, not a boundary against a
+determined one — `python -c`, `sed`, and a dozen other allowed tools each grant
+arbitrary effects, and no JSON file changes that. If you need a real boundary,
+run the agent under its own uid or in a container; see `docs/design.md` §11.
+
+The policy file deliberately lives in the data directory rather than in the
+agent's worktree. In the worktree it was an untracked file that `git add -A`
+would commit into your app's repository, absolute server paths and all.
+
 ### Claude binary
 
 slot-machine installs the Claude Code CLI automatically on first start into
-`.slot-machine/.local/bin/claude`. To use your own installation:
+`.slot-machine/.local/bin/claude`, by piping the official installer to a shell.
+If you would rather that not happen on your server, install it yourself and
+point slot-machine at it:
 
 ```sh
 export SLOT_MACHINE_AGENT_BIN=/path/to/claude
 ```
+
+### Updating slot-machine
+
+`slot-machine update` verifies the downloaded binary against the `checksums.txt`
+published with the release, and refuses to install anything if that file is
+missing or the hash does not match. A tool that supervises deploys should not
+replace itself with unverified bytes.
 
 ### Deploy key (git push from agent)
 
@@ -269,9 +316,8 @@ To let the agent push to a remote branch, add a deploy key:
    ```
 5. Add the remote to the bare repo: `git remote add origin git@github.com:user/repo.git`
 
-The agent's file tools are scoped to the staging directory and cannot access
-`~/.ssh/`. Deny rules also block `Read`, `Bash(cat ...)`, and similar commands
-on `~/.ssh/*`.
+slot-machine denies the agent's `Read`/`Edit`/`Write` tools on `~/.ssh/**`, so
+the file tools cannot reach the key. **A shell can.** See below.
 
 ### Branch model
 

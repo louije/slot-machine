@@ -291,3 +291,29 @@ func (o *orchestrator) removeWorktree(dir string) {
 		exec.Command("git", "-C", o.repoDir, "worktree", "prune").Run()
 	}
 }
+
+// warnTrackedSharedDirs checks the shared_dirs configuration against git.
+//
+// A shared dir is replaced by a symlink in every slot. If the same path is also
+// tracked in the repository, the two mechanisms fight: a deploy's
+// `git checkout --force` wants real files there, and applySharedDirs wants a
+// symlink. The result depends on ordering, which is the worst kind of bug to
+// diagnose. Nothing here can safely fix it — dropping tracked files or ignoring
+// the config would both lose data — so say so clearly at startup instead.
+func (o *orchestrator) warnTrackedSharedDirs() {
+	for _, name := range o.cfg.SharedDirs {
+		name = filepath.Clean(name)
+		if name == "." || name == ".." || filepath.IsAbs(name) {
+			continue
+		}
+		out, err := git(o.repoDir, "ls-files", "--", name)
+		if err != nil || strings.TrimSpace(out) == "" {
+			continue
+		}
+		n := len(splitLines(out))
+		logf("warning: shared_dir %q has %d file(s) tracked in git. "+
+			"Shared dirs are replaced by symlinks in every slot, so a tracked path "+
+			"will fight the checkout. Add %s to .gitignore and `git rm -r --cached %s`.",
+			name, n, name, name)
+	}
+}

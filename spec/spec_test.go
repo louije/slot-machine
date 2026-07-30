@@ -121,20 +121,32 @@ func TestDeployUnhealthy(t *testing.T) {
 	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
+	// Establish a known-good live slot, so "untouched" is something we can see.
+	mustDeploy(t, apiPort, repo.CommitA)
+	before := status(t, apiPort)
+
 	// Deploy the "bad" commit — app starts with --start-unhealthy.
-	dr, _ := deploy(t, apiPort, repo.CommitBad)
+	dr, code := deploy(t, apiPort, repo.CommitBad)
 	if dr.Success {
 		t.Fatal("expected deploy to fail, but success=true")
 	}
-
-	// Status should show no live commit (nothing was deployed before).
-	st := status(t, apiPort)
-	if st.LiveCommit != "" {
-		t.Fatalf("expected empty live_commit after failed deploy, got %s", st.LiveCommit)
+	if dr.Stage != "probe" {
+		t.Fatalf("stage = %q, want %q (error: %s)", dr.Stage, "probe", dr.Error)
+	}
+	if code == 200 {
+		t.Fatal("expected a non-200 status for a refused deploy")
 	}
 
-	// The failed process should have been killed — port should not respond.
-	waitForDown(t, appPort, 5*time.Second)
+	// The live slot is untouched, and still serving.
+	after := status(t, apiPort)
+	if after.LiveCommit != before.LiveCommit {
+		t.Fatalf("live commit changed on a failed deploy: %s → %s",
+			before.LiveCommit, after.LiveCommit)
+	}
+	statusCode, _ := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/", appPort))
+	if statusCode != 200 {
+		t.Fatalf("the previous version stopped serving after a failed deploy: got %d", statusCode)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -156,10 +168,7 @@ func TestDeployThenRollback(t *testing.T) {
 	_ = orch
 
 	// Deploy A, then B.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy A failed")
-	}
+	dr := mustDeploy(t, apiPort, repo.CommitA)
 
 	dr, _ = deploy(t, apiPort, repo.CommitB)
 	if !dr.Success {
@@ -173,13 +182,7 @@ func TestDeployThenRollback(t *testing.T) {
 	}
 
 	// Rollback.
-	rr, code := rollback(t, apiPort)
-	if code != 200 {
-		t.Fatalf("rollback returned %d", code)
-	}
-	if !rr.Success {
-		t.Fatal("rollback reported success=false")
-	}
+	mustRollback(t, apiPort)
 
 	// Status should show A live again.
 	st = status(t, apiPort)
@@ -213,10 +216,7 @@ func TestOnlyOnePreviousSlot(t *testing.T) {
 	_ = orch
 
 	// Deploy A.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy A failed")
-	}
+	dr := mustDeploy(t, apiPort, repo.CommitA)
 
 	// Deploy B.
 	dr, _ = deploy(t, apiPort, repo.CommitB)
@@ -327,10 +327,7 @@ func TestProcessCrashDetected(t *testing.T) {
 	_ = orch
 
 	// Deploy commit A.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	st := status(t, apiPort)
 	if !st.Healthy {
@@ -340,16 +337,21 @@ func TestProcessCrashDetected(t *testing.T) {
 	// Crash the app by calling /control/crash on the internal port.
 	httpPost(t, fmt.Sprintf("http://127.0.0.1:%d/control/crash", intPort))
 
-	// Wait for the process to actually die.
-	waitForDown(t, appPort, 5*time.Second)
-
-	// Give the orchestrator a moment to detect the crash via process exit.
-	time.Sleep(500 * time.Millisecond)
+	// The public port stays bound and starts answering 503. It must not start
+	// refusing connections: a client cannot distinguish that from the machine
+	// being gone, and releasing the port lets something else claim it while the
+	// app is down.
+	waitForStatusCode(t, appPort, http.StatusServiceUnavailable, 5*time.Second)
 
 	// Status should now reflect unhealthy.
 	st = status(t, apiPort)
 	if st.Healthy {
 		t.Fatal("expected healthy=false after crash, but got true")
+	}
+	// ...and the port is still ours, which is what makes the next deploy able
+	// to reclaim it without a race.
+	if !st.ProxyListening {
+		t.Fatal("expected the proxy to still be listening after an app crash")
 	}
 }
 
@@ -374,10 +376,7 @@ func TestDrainTimeoutForceKill(t *testing.T) {
 	_ = orch
 
 	// Deploy commit A.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy A failed")
-	}
+	dr := mustDeploy(t, apiPort, repo.CommitA)
 
 	// Make the app ignore SIGTERM — it will only die to SIGKILL.
 	httpPost(t, fmt.Sprintf("http://127.0.0.1:%d/control/hang", intPort))
@@ -434,10 +433,7 @@ func TestEnvFilePassedToApp(t *testing.T) {
 	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort, release)
 	_ = orch
 
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	// Query the testapp's /env endpoint on the internal port.
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -471,10 +467,7 @@ func TestSlotMachineEnvVar(t *testing.T) {
 	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/env?key=SLOT_MACHINE", intPort))
@@ -520,10 +513,7 @@ func TestSetupCommandRuns(t *testing.T) {
 
 	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort, release)
 
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	dr := mustDeploy(t, apiPort, repo.CommitA)
 
 	// Check that .setup-done exists in the slot directory.
 	marker := filepath.Join(orch.DataDir, dr.Slot, ".setup-done")
@@ -572,10 +562,7 @@ func TestDaemonShutdownDrainsProcesses(t *testing.T) {
 	waitForHealth(t, apiPort, 5*time.Second)
 
 	// Deploy so there's a running app process.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	// Verify app is up.
 	waitForHealth(t, appPort, 5*time.Second)
@@ -618,10 +605,7 @@ func TestZeroDowntime(t *testing.T) {
 	_ = orch
 
 	// Deploy commit A.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy A failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 	waitForHealth(t, appPort, 5*time.Second)
 
 	// Start deploying the slow commit (3s boot delay) asynchronously.
@@ -670,10 +654,7 @@ func TestStatusIncludesStagingDir(t *testing.T) {
 	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 	_ = orch
 
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	st := status(t, apiPort)
 	if st.StagingDir == "" {
@@ -711,10 +692,7 @@ func TestStagingPreservesArtifacts(t *testing.T) {
 
 	orch := startOrchestrator(t, bin, contractPath, repo.Dir, apiPort, release)
 
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 
 	// The staging directory should exist and contain the marker.
 	stagingDir := filepath.Join(orch.DataDir, "slot-staging")
@@ -742,10 +720,7 @@ func TestSymlinksOnDisk(t *testing.T) {
 	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 
 	// Deploy A.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy A failed")
-	}
+	dr := mustDeploy(t, apiPort, repo.CommitA)
 
 	// Check live symlink exists and references commit A.
 	liveLink := filepath.Join(orch.DataDir, "live")
@@ -835,10 +810,7 @@ func TestDaemonRestart(t *testing.T) {
 	cmd1 := startDaemon()
 	waitForHealth(t, apiPort, 5*time.Second)
 
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy failed")
-	}
+	mustDeploy(t, apiPort, repo.CommitA)
 	st := status(t, apiPort)
 	if st.LiveCommit != repo.CommitA {
 		t.Fatalf("expected live_commit=%s, got %s", repo.CommitA, st.LiveCommit)
@@ -880,10 +852,7 @@ func TestGarbageCollection(t *testing.T) {
 	orch := startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
 
 	// Deploy A.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy A failed")
-	}
+	dr := mustDeploy(t, apiPort, repo.CommitA)
 
 	// A's slot dir should use hash-based naming.
 	aSlotDir := filepath.Join(orch.DataDir, fmt.Sprintf("slot-%s", repo.CommitA[:8]))
@@ -936,10 +905,7 @@ func TestRollbackThenDeploy(t *testing.T) {
 	_ = orch
 
 	// Deploy A, then B.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy A failed")
-	}
+	dr := mustDeploy(t, apiPort, repo.CommitA)
 	dr, _ = deploy(t, apiPort, repo.CommitB)
 	if !dr.Success {
 		t.Fatal("deploy B failed")
@@ -988,10 +954,7 @@ func TestRedeploySameCommit(t *testing.T) {
 	_ = orch
 
 	// Deploy A, then B.
-	dr, _ := deploy(t, apiPort, repo.CommitA)
-	if !dr.Success {
-		t.Fatal("deploy A failed")
-	}
+	dr := mustDeploy(t, apiPort, repo.CommitA)
 	dr, _ = deploy(t, apiPort, repo.CommitB)
 	if !dr.Success {
 		t.Fatal("deploy B failed")
@@ -1060,5 +1023,57 @@ func TestDeployShortHash(t *testing.T) {
 	expectedSlot := fmt.Sprintf("slot-%s", repo.CommitA[:8])
 	if dr.Slot != expectedSlot {
 		t.Fatalf("slot = %q, want %q", dr.Slot, expectedSlot)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// An app that boots too slowly fails its health check
+// ---------------------------------------------------------------------------
+//
+// The rest of the suite uses a generous health_timeout_ms so that a loaded
+// machine cannot masquerade as a failing deploy. That leaves the timeout itself
+// uncovered, so cover it here deliberately, with a window short enough that the
+// outcome is about the app and not about the runner.
+
+func TestDeploySlowAppFailsHealthCheck(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeGateContract(t, t.TempDir(), appPort, intPort, map[string]any{
+		"health_timeout_ms": 800, // CommitSlow sleeps 3s before serving
+	})
+
+	startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
+
+	// Establish a healthy live slot first, so we can prove it survives.
+	mustDeploy(t, apiPort, repo.CommitA)
+
+	dr, code := deploy(t, apiPort, repo.CommitSlow)
+	if dr.Success {
+		t.Fatal("expected the slow app to fail its health check")
+	}
+	if code == 200 {
+		t.Fatalf("expected a non-200 status, got 200")
+	}
+	if dr.Stage != "probe" {
+		t.Fatalf("stage = %q, want %q (error: %s)", dr.Stage, "probe", dr.Error)
+	}
+	if !strings.Contains(dr.Error, "/healthz") {
+		t.Fatalf("the error should name the endpoint that did not pass, got: %s", dr.Error)
+	}
+
+	// The live slot is untouched and still serving.
+	st := status(t, apiPort)
+	if st.LiveCommit != repo.CommitA {
+		t.Fatalf("live commit changed after a failed health check: %s", st.LiveCommit)
+	}
+	statusCode, _ := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/", appPort))
+	if statusCode != 200 {
+		t.Fatalf("the previous version stopped serving: got %d", statusCode)
 	}
 }

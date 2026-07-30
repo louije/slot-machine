@@ -22,15 +22,16 @@ type agentService struct {
 	configPath string
 	envFunc    func() []string
 
-	authMode      string // "hmac", "trusted", "none"
-	authSecret    string // hex-encoded HMAC secret (for "hmac" mode)
-	allowedTools  []string
-	model         string
-	timeout       time.Duration
-	machineBranch string
-	humanBranch   string
-	chatTitle     string
-	chatAccent    string
+	authMode       string // "hmac", "trusted", "none"
+	authSecret     string // hex-encoded HMAC secret (for "hmac" mode)
+	allowedTools   []string
+	deniedCommands []string
+	model          string
+	timeout        time.Duration
+	machineBranch  string
+	humanBranch    string
+	chatTitle      string
+	chatAccent     string
 }
 
 var titlePattern = regexp.MustCompile(`\[\[TITLE:\s*(.+?)\]\]`)
@@ -212,6 +213,7 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 		dir:          a.workDir,
 		env:          a.buildAgentEnv(),
 		allowedTools: a.allowedTools,
+		settingsPath: a.agentPolicyPath(),
 		model:        a.model,
 		systemPrompt: a.buildSystemPrompt(),
 		timeout:      a.timeout,
@@ -222,11 +224,10 @@ func (a *agentService) handleSendMessage(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Deny rules are regenerated per turn: the agent has a shell in this
-	// directory and could remove them, and a fresh copy each turn bounds that to
-	// a single turn.
-	if err := a.generateDenySettings(); err != nil {
-		logf("agent: writing deny settings: %v", err)
+	// Regenerated per turn: the agent shares this machine's filesystem, so a
+	// fresh copy each turn bounds any tampering to a single turn.
+	if err := a.writeAgentPolicy(); err != nil {
+		logf("agent: writing tool policy: %v", err)
 	}
 
 	if err := a.manager.enqueue(work); err != nil {

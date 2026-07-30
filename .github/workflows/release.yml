@@ -23,6 +23,12 @@ jobs:
           GOOS=linux  GOARCH=amd64 go build -ldflags="$ldflags" -o slot-machine-linux-amd64  ./cmd/slot-machine/
           GOOS=darwin GOARCH=arm64 go build -ldflags="$ldflags" -o slot-machine-darwin-arm64 ./cmd/slot-machine/
 
+          # `slot-machine update` verifies the binary it downloads against this
+          # file. Without it, update replaces a running deploy tool with
+          # whatever the transfer happened to produce.
+          sha256sum slot-machine-linux-amd64 slot-machine-darwin-arm64 > checksums.txt
+          cat checksums.txt
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -31,4 +37,5 @@ jobs:
           gh release delete "$tag" --yes 2>/dev/null || true
           gh release create "$tag" --generate-notes \
             slot-machine-linux-amd64 \
-            slot-machine-darwin-arm64
+            slot-machine-darwin-arm64 \
+            checksums.txt

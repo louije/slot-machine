@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 const releaseURL = "https://api.github.com/repos/louije/slot-machine/releases/latest"
@@ -59,15 +62,32 @@ func cmdUpdate() {
 	}
 
 	wantName := fmt.Sprintf("slot-machine-%s-%s", runtime.GOOS, runtime.GOARCH)
-	var assetURL string
+	var assetURL, checksumURL string
 	for _, a := range rel.Assets {
-		if a.Name == wantName {
+		switch a.Name {
+		case wantName:
 			assetURL = a.URL
-			break
+		case "checksums.txt":
+			checksumURL = a.URL
 		}
 	}
 	if assetURL == "" {
 		fmt.Fprintf(os.Stderr, "error: no asset %q in release %s\n", wantName, rel.TagName)
+		os.Exit(1)
+	}
+
+	// Refuse to self-replace without a checksum to check against. This binary
+	// supervises deploys; silently installing an unverified replacement is not a
+	// tradeoff worth making for convenience.
+	if checksumURL == "" {
+		fmt.Fprintf(os.Stderr, "error: release %s has no checksums.txt, refusing to update\n", rel.TagName)
+		fmt.Fprintln(os.Stderr, "download the binary manually if you are sure")
+		os.Exit(1)
+	}
+
+	wantSum, err := fetchChecksum(checksumURL, wantName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -95,13 +115,24 @@ func cmdUpdate() {
 		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", tmp, err)
 		os.Exit(1)
 	}
-	if _, err := io.Copy(f, dlResp.Body); err != nil {
+	// Hash while writing, so the bytes verified are exactly the bytes stored.
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(f, hash), dlResp.Body); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		fmt.Fprintf(os.Stderr, "error: download failed: %v\n", err)
 		os.Exit(1)
 	}
 	f.Close()
+
+	gotSum := hex.EncodeToString(hash.Sum(nil))
+	if gotSum != wantSum {
+		os.Remove(tmp)
+		fmt.Fprintf(os.Stderr, "error: checksum mismatch for %s\n", wantName)
+		fmt.Fprintf(os.Stderr, "  expected %s\n  got      %s\n", wantSum, gotSum)
+		fmt.Fprintln(os.Stderr, "the download was corrupted or tampered with; nothing was installed")
+		os.Exit(1)
+	}
 
 	if err := os.Rename(tmp, self); err != nil {
 		os.Remove(tmp)
@@ -110,4 +141,41 @@ func cmdUpdate() {
 	}
 
 	fmt.Printf("%s → %s\n", Version, rel.TagName)
+}
+
+// fetchChecksum downloads checksums.txt and returns the expected hash for name.
+// The format is sha256sum's: "<hex>  <name>" per line.
+func fetchChecksum(url, name string) (string, error) {
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Accept", "application/octet-stream")
+	req.Header.Set("User-Agent", "slot-machine/"+Version)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("downloading checksums.txt: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("downloading checksums.txt: HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("reading checksums.txt: %w", err)
+	}
+	return parseChecksum(string(body), name)
+}
+
+func parseChecksum(body, name string) (string, error) {
+	for _, line := range strings.Split(body, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		// sha256sum prefixes binary-mode entries with "*".
+		if strings.TrimPrefix(fields[1], "*") == name {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	return "", fmt.Errorf("checksums.txt has no entry for %s", name)
 }

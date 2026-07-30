@@ -88,21 +88,21 @@ func (p *dynamicProxy) listen() (net.Listener, error) {
 	}
 }
 
-// clearTarget drops the backend and stops listening on the public port.
+// clearTarget drops the backend but keeps the public port bound, so a crashed
+// app presents as 503 rather than as a refused connection.
 //
-// Whether a crashed app should present as connection-refused or as a 503 is a
-// real design question — a 503 is more actionable, and holding the port stops
-// anything else claiming it — but it is a change to the contract in
-// docs/orchestrator-spec.md (scenario 7), not a bug. Left as it was; the retry
-// in listen() covers the re-bind race that closing creates.
+// Closing the listener was strictly worse in three ways. Callers could not tell
+// "the app is down" from "the whole machine is gone", which is the difference
+// between retrying and paging someone. The port went back to the OS, so
+// anything else on the box could take it while the app was down. And the next
+// deploy then had to win a race to get its own port back.
+//
+// serveHTTP already answers 503 whenever there is no target, so this is also
+// less code doing more.
 func (p *dynamicProxy) clearTarget() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.port = 0
-	if p.srv != nil {
-		p.srv.Close()
-		p.srv = nil
-	}
 }
 
 func (p *dynamicProxy) shutdown() {

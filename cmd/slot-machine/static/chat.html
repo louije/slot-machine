@@ -312,7 +312,10 @@ var TOOL_INFO = {
   Task:  { icon:'\u{1F916}', label:'Spawned agent' }
 };
 function getToolInfo(name) {
-  return TOOL_INFO[name] || { icon:'\u{1F527}', label:name || 'Tool' };
+  // The label is interpolated into innerHTML below, and an unrecognised tool
+  // name comes straight from the agent's output — MCP and plugin tools can be
+  // named anything at all. Escape it here so there is exactly one place to look.
+  return TOOL_INFO[name] || { icon:'\u{1F527}', label:escHtml(name) || 'Tool' };
 }
 
 function createToolEl(name, id) {

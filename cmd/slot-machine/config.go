@@ -18,13 +18,14 @@ type config struct {
 	EnvFile         string `json:"env_file"`
 	APIPort         int    `json:"api_port"`
 
-	AgentAuth         string   `json:"agent_auth"`          // "hmac" (default), "trusted", "none"
-	AgentAllowedTools []string `json:"agent_allowed_tools"` // claude --allowed-tools
-	AgentModel        string   `json:"agent_model"`         // claude --model
-	AgentTimeoutS     int      `json:"agent_timeout_s"`     // max seconds for one agent turn
-	SharedDirs        []string `json:"shared_dirs"`         // dirs symlinked to a shared location
-	ChatTitle         string   `json:"chat_title"`
-	ChatAccent        string   `json:"chat_accent"`
+	AgentAuth           string   `json:"agent_auth"`            // "hmac" (default), "trusted", "none"
+	AgentAllowedTools   []string `json:"agent_allowed_tools"`   // claude --allowed-tools
+	AgentDeniedCommands []string `json:"agent_denied_commands"` // extra Bash prefixes to deny
+	AgentModel          string   `json:"agent_model"`           // claude --model
+	AgentTimeoutS       int      `json:"agent_timeout_s"`       // max seconds for one agent turn
+	SharedDirs          []string `json:"shared_dirs"`           // dirs symlinked to a shared location
+	ChatTitle           string   `json:"chat_title"`
+	ChatAccent          string   `json:"chat_accent"`
 
 	// Branch model. The agent commits to MachineBranch; humans work on
 	// HumanBranch. See docs/design.md §4.

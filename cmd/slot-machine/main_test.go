@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -319,28 +320,42 @@ func TestDynamicProxyLifecycle(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	// Clear target — listener should stop.
+	// Clear target — the port stays bound and answers 503, so a crashed app is
+	// distinguishable from a machine that is gone.
 	p.clearTarget()
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err = http.Get(fmt.Sprintf("http://%s/", addr))
+	if err != nil {
+		t.Fatalf("the proxy must keep listening after clearTarget: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 with no live slot, got %d", resp.StatusCode)
+	}
+	if !p.listening() {
+		t.Fatal("expected listening() to report true after clearTarget")
+	}
+
+	// Re-targeting serves again without re-binding.
+	p.setTarget(bPort)
+	resp, err = http.Get(fmt.Sprintf("http://%s/", addr))
+	if err != nil {
+		t.Fatalf("GET after re-target: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 after re-target, got %d", resp.StatusCode)
+	}
+
+	// shutdown does release the port.
+	p.shutdown()
 	time.Sleep(50 * time.Millisecond)
 
 	conn, err = net.DialTimeout("tcp", addr, 100*time.Millisecond)
 	if err == nil {
 		conn.Close()
-		t.Fatal("expected connection refused after clearTarget")
-	}
-
-	// Re-binding after a clear must work: listen() retries briefly so an
-	// in-flight close does not make the next deploy lose its own port.
-	p.setTarget(bPort)
-	time.Sleep(50 * time.Millisecond)
-
-	resp, err = http.Get(fmt.Sprintf("http://%s/", addr))
-	if err != nil {
-		t.Fatalf("proxy did not come back after clearTarget: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200 after re-target, got %d", resp.StatusCode)
+		t.Fatal("expected connection refused after shutdown")
 	}
 }
 
@@ -1501,5 +1516,175 @@ func TestAgentManagerSurfacesStderr(t *testing.T) {
 	}
 	if !strings.Contains(joined, "something specific went wrong") {
 		t.Fatalf("stderr must reach the conversation, got: %s", joined)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tool policy
+// ---------------------------------------------------------------------------
+
+func TestWriteAgentPolicy(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	workDir := t.TempDir()
+	a := &agentService{
+		dataDir:        dataDir,
+		workDir:        workDir,
+		configPath:     filepath.Join(t.TempDir(), "slot-machine.json"),
+		deniedCommands: []string{"terraform"},
+	}
+
+	if err := a.writeAgentPolicy(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The policy must not live in the agent's worktree. There it was an
+	// untracked file that `git add -A` would commit into the app's repo, with
+	// absolute server paths in it.
+	if _, err := os.Stat(filepath.Join(workDir, ".claude", "settings.json")); err == nil {
+		t.Fatal("policy must not be written inside the agent worktree")
+	}
+
+	data, err := os.ReadFile(a.agentPolicyPath())
+	if err != nil {
+		t.Fatalf("policy file not written to the data directory: %v", err)
+	}
+
+	var parsed struct {
+		Permissions struct {
+			Deny []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("policy is not valid JSON: %v", err)
+	}
+
+	joined := strings.Join(parsed.Permissions.Deny, "\n")
+	for _, want := range []string{
+		"Bash(sudo:*)",
+		"Bash(rm -rf /:*)",
+		"Bash(git push --force:*)",
+		"Bash(slot-machine start:*)",
+		"Bash(terraform:*)", // from config
+		"Write(" + a.configPath + ")",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("policy missing %q\ngot:\n%s", want, joined)
+		}
+	}
+
+	// ~/.ssh must be denied in both the expanded and the tilde form: matching is
+	// a prefix match against the command as typed, and an agent types the tilde.
+	if !strings.Contains(joined, "Read(~/.ssh/**)") {
+		t.Error("policy must deny the tilde form of ~/.ssh, which is how it gets typed")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if !strings.Contains(joined, "Read("+filepath.Join(home, ".ssh")+"/**)") {
+			t.Error("policy must also deny the expanded form of ~/.ssh")
+		}
+	}
+}
+
+// The policy is regenerated every turn, so an agent that deletes it only
+// escapes for the remainder of that turn.
+func TestAgentPolicyRegenerated(t *testing.T) {
+	t.Parallel()
+
+	a := &agentService{
+		dataDir:    t.TempDir(),
+		workDir:    t.TempDir(),
+		configPath: filepath.Join(t.TempDir(), "slot-machine.json"),
+	}
+	if err := a.writeAgentPolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(a.agentPolicyPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.writeAgentPolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(a.agentPolicyPath()); err != nil {
+		t.Fatalf("policy was not regenerated: %v", err)
+	}
+}
+
+// The policy path must reach the CLI, or none of it applies.
+func TestBuildAgentArgsPassesSettings(t *testing.T) {
+	t.Parallel()
+	args := buildAgentArgs(agentWork{prompt: "hi", settingsPath: "/data/agent-settings.json"}, false)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--settings /data/agent-settings.json") {
+		t.Fatalf("expected --settings to be passed, got: %s", joined)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Self-update integrity
+// ---------------------------------------------------------------------------
+
+func TestParseChecksum(t *testing.T) {
+	t.Parallel()
+
+	body := "" +
+		"aaaa1111  slot-machine-linux-amd64\n" +
+		"BBBB2222 *slot-machine-darwin-arm64\n" +
+		"garbage line\n"
+
+	t.Run("plain entry", func(t *testing.T) {
+		got, err := parseChecksum(body, "slot-machine-linux-amd64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "aaaa1111" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	// sha256sum marks binary-mode entries with a leading "*"; the name still
+	// matches.
+	t.Run("binary-mode entry", func(t *testing.T) {
+		got, err := parseChecksum(body, "slot-machine-darwin-arm64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "bbbb2222" {
+			t.Fatalf("got %q, want the hash lowercased", got)
+		}
+	})
+
+	t.Run("missing entry is an error, not an empty hash", func(t *testing.T) {
+		if _, err := parseChecksum(body, "slot-machine-windows-amd64"); err == nil {
+			t.Fatal("expected an error for a name with no entry")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// System prompt bounds
+// ---------------------------------------------------------------------------
+
+// The prompt is one command-line argument, and Linux caps a single argument at
+// 128 KiB. Exceeding it is E2BIG — no agent at all — so the instruction file is
+// bounded rather than trusted.
+func TestBuildSystemPromptCapsInstructions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	huge := strings.Repeat("x", maxInstructionBytes*2)
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(huge), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &agentService{workDir: dir, machineBranch: "machine", humanBranch: "main"}
+	prompt := a.buildSystemPrompt()
+
+	if len(prompt) > maxInstructionBytes+16*1024 {
+		t.Fatalf("prompt is %d bytes; the instruction file was not capped", len(prompt))
+	}
+	// The base prompt must survive the truncation.
+	if !strings.Contains(prompt, "[[TITLE:") {
+		t.Fatal("truncation dropped slot-machine's own instructions")
 	}
 }

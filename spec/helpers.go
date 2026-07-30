@@ -46,6 +46,8 @@ type RollbackResponse struct {
 	Success bool   `json:"success"`
 	Slot    string `json:"slot"`
 	Commit  string `json:"commit"`
+	Stage   string `json:"stage"`
+	Error   string `json:"error"`
 }
 
 // StatusResponse matches the JSON returned by GET /status.
@@ -60,6 +62,7 @@ type StatusResponse struct {
 	MachineCommit  string `json:"machine_commit"`
 	LastDeployTime string `json:"last_deploy_time"`
 	Healthy        bool   `json:"healthy"`
+	ProxyListening bool   `json:"proxy_listening"`
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +215,16 @@ func setupTestRepo(t *testing.T, testappBin string, appPort, internalPort int) T
 		"commit Slow: slow-booting app",
 	)
 
+	// HEAD must be healthy. The daemon auto-deploys HEAD at startup, and when
+	// that was the slow commit every test in the suite began with a deploy that
+	// failed on a timeout — noisy, slow, and worse: tests silently came to
+	// depend on there being no live slot afterwards. A healthy HEAD makes
+	// startup deterministic and says what it means.
+	writeStartAndCommit(
+		"#!/bin/sh\n# head\nexec ./testapp\n",
+		"commit Head: healthy app at HEAD",
+	)
+
 	return TestRepo{
 		Dir:        dir,
 		CommitA:    commitA,
@@ -236,11 +249,15 @@ func writeTestContract(t *testing.T, dir string, port, internalPort, drainTimeou
 	}
 
 	contract := map[string]any{
-		"start_command":     "./start.sh",
-		"port":              port,
-		"internal_port":     internalPort,
-		"health_endpoint":   "/healthz",
-		"health_timeout_ms": 3000,
+		"start_command":   "./start.sh",
+		"port":            port,
+		"internal_port":   internalPort,
+		"health_endpoint": "/healthz",
+		// Generous on purpose. This suite runs a dozen daemons, apps and agents
+		// at once, and a tight window measures the machine's load rather than
+		// slot-machine's behaviour. Tests that are actually *about* the health
+		// timeout set their own short one — see TestDeploySlowAppFailsHealthCheck.
+		"health_timeout_ms": 8000,
 		"drain_timeout_ms":  drainTimeoutMs,
 		"agent_auth":        "none",
 	}
@@ -385,6 +402,33 @@ func deploy(t *testing.T, apiPort int, commit string) (DeployResponse, int) {
 	return dr, resp.StatusCode
 }
 
+// mustDeploy deploys and fails the test with the stage and reason if the deploy
+// was refused.
+//
+// A bare "deploy failed" throws away exactly the information the deploy response
+// carries: which stage stopped it and why. That cost real debugging time — an
+// intermittent failure in this suite reported nothing but the words "deploy
+// failed", so the first step was always to reproduce it again with more output.
+func mustDeploy(t *testing.T, apiPort int, commit string) DeployResponse {
+	t.Helper()
+	dr, code := deploy(t, apiPort, commit)
+	if !dr.Success {
+		t.Fatalf("deploy of %s was refused at stage %q (HTTP %d): %s",
+			commit[:min(8, len(commit))], dr.Stage, code, dr.Error)
+	}
+	return dr
+}
+
+// mustRollback is mustDeploy's counterpart.
+func mustRollback(t *testing.T, apiPort int) RollbackResponse {
+	t.Helper()
+	rr, code := rollback(t, apiPort)
+	if !rr.Success {
+		t.Fatalf("rollback was refused at stage %q (HTTP %d): %s", rr.Stage, code, rr.Error)
+	}
+	return rr
+}
+
 // AsyncDeployResult holds the outcome of an asynchronous deploy call.
 type AsyncDeployResult struct {
 	Resp   DeployResponse
@@ -483,6 +527,37 @@ func waitForHealth(t *testing.T, port int, timeout time.Duration) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("port %d did not respond 200 within %v", port, timeout)
+}
+
+// waitForStatusCode polls a port until it answers with the given status code.
+//
+// Distinct from waitForDown: a crashed app leaves the daemon's proxy listening
+// and answering 503, because "the service is unavailable" and "nothing is
+// there" are different facts and callers act on them differently.
+func waitForStatusCode(t *testing.T, port, want int, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+
+	var last string
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err != nil {
+			last = err.Error()
+		} else {
+			code := resp.StatusCode
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if code == want {
+				return
+			}
+			last = fmt.Sprintf("status %d", code)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("port %d did not return %d within %v (last: %s)", port, want, timeout, last)
 }
 
 // waitForDown polls a port until it stops responding. Used to verify a process
@@ -606,7 +681,7 @@ func writeTestContractWithAuth(t *testing.T, dir string, port, internalPort, dra
 		"port":              port,
 		"internal_port":     internalPort,
 		"health_endpoint":   "/healthz",
-		"health_timeout_ms": 3000,
+		"health_timeout_ms": 8000,
 		"drain_timeout_ms":  drainTimeoutMs,
 		"agent_auth":        authMode,
 	}
