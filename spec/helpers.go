@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -342,11 +343,18 @@ func startOrchestrator(t *testing.T, binary, contractPath, repoDir string, apiPo
 		stopOrchestrator(t, orch)
 	})
 
-	// Wait for the API to become reachable (up to 5 seconds).
-	waitForHealth(t, apiPort, 5*time.Second)
+	waitForHealth(t, apiPort, daemonStartTimeout)
 
 	return orch
 }
+
+// daemonStartTimeout bounds how long the API port may take to answer.
+//
+// The daemon deliberately finishes its startup deploy before it accepts API
+// requests, so a client that can reach the API knows startup is done. That means
+// this wait covers a full deploy — including one that fails on its health
+// timeout, which is the slowest case there is. Generous accordingly.
+const daemonStartTimeout = 25 * time.Second
 
 // stopOrchestrator sends SIGTERM and waits briefly. If the process doesn't exit,
 // it sends SIGKILL. Errors are not fatal — the process may already be dead.
@@ -663,7 +671,7 @@ func startOrchestratorWithAgentEnv(t *testing.T, binary, contractPath, repoDir s
 		stopOrchestrator(t, orch)
 	})
 
-	waitForHealth(t, apiPort, 5*time.Second)
+	waitForHealth(t, apiPort, daemonStartTimeout)
 
 	return orch
 }
@@ -710,4 +718,20 @@ func httpPost(t *testing.T, url string) int {
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
+}
+
+// gitIn runs a git command in a test repository and fails the test if it errors.
+func gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }

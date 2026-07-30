@@ -499,6 +499,16 @@ func New(opts Options) *Orchestrator {
 	}
 }
 
+// StartProxies binds the public ports before anything is deployed, so the chat
+// and the status API are reachable even when no deploy has ever succeeded.
+func (o *Orchestrator) StartProxies() {
+	// A bind failure is logged by the proxy and surfaced as proxy_listening in
+	// GET /status. It is not fatal: the daemon's own API is on a separate port
+	// and still works, which is what an operator needs to diagnose it.
+	o.appProxy.Start()
+	o.intProxy.Start()
+}
+
 // Shutdown drains the app processes and releases the public ports.
 func (o *Orchestrator) Shutdown() {
 	o.DrainAll()

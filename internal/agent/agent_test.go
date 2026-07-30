@@ -680,11 +680,11 @@ func TestBuildAgentArgs(t *testing.T) {
 	t.Parallel()
 
 	args := buildAgentArgs(turn{
-		prompt:       "-rf looks like a flag",
-		sessionID:    "sess-1",
-		model:        "claude-opus-5",
-		systemPrompt: "context",
-		allowedTools: []string{"Bash", "Read"},
+		prompt:           "-rf looks like a flag",
+		sessionID:        "sess-1",
+		model:            "claude-opus-5",
+		systemPromptPath: "/data/agent-system-prompt.md",
+		allowedTools:     []string{"Bash", "Read"},
 	}, true)
 
 	joined := strings.Join(args, " ")
@@ -692,10 +692,15 @@ func TestBuildAgentArgs(t *testing.T) {
 	// Append, don't replace: --system-prompt would discard the CLI's own tool
 	// guidance along with everything else it puts in there.
 	if strings.Contains(joined, "--system-prompt ") {
-		t.Fatal("must use --append-system-prompt, not --system-prompt")
+		t.Fatal("must use --append-system-prompt-file, not --system-prompt")
 	}
-	if !strings.Contains(joined, "--append-system-prompt") {
-		t.Fatal("missing --append-system-prompt")
+	// By file, not inline: inline puts the whole prompt in argv, where ps can
+	// read it and the OS caps its length.
+	if !strings.Contains(joined, "--append-system-prompt-file /data/agent-system-prompt.md") {
+		t.Fatalf("expected the prompt to be passed by file, got: %s", joined)
+	}
+	if strings.Contains(joined, "--append-system-prompt ") {
+		t.Fatal("the prompt must not also be passed inline")
 	}
 	if !strings.Contains(joined, "--model claude-opus-5") {
 		t.Fatal("model must be explicit, or the run inherits the server user's settings")
@@ -808,9 +813,6 @@ func TestWriteAgentPolicy(t *testing.T) {
 		}
 	}
 }
-
-// The policy is regenerated every turn, so an agent that deletes it only
-// escapes for the remainder of that turn.
 
 // The policy is regenerated every turn, so an agent that deletes it only
 // escapes for the remainder of that turn.

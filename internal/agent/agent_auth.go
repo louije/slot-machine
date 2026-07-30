@@ -49,7 +49,7 @@ const systemPromptBase = `You are an AI assistant embedded in a web application 
 
 Your working directory is the *machine slot* — a git worktree checked out on the
 %s branch. It is yours: slot-machine never rewrites, renames or force-checks-out
-this directory, so uncommitted turn here is safe across deploys.
+this directory, so uncommitted work here is safe across deploys.
 
 The application serving real traffic runs from a different directory, from a
 specific commit. Your edits change nothing about production until you deploy.
@@ -85,9 +85,9 @@ also hides it.
 If you believe a refusal is wrong, say so in the conversation and stop. The
 thresholds live in slot-machine.json, which a human can change and you cannot.
 
-## Staying current with human turn
+## Staying current with human work
 
-Humans commit to %s; you commit to %s. Before you change code, merge their turn:
+Humans commit to %s; you commit to %s. Before you change code, merge their work:
 
   git fetch origin %s
   git merge origin/%s
@@ -97,7 +97,7 @@ you, say so rather than guessing. ` + "`slot-machine status`" + ` shows how far 
 branches have drifted.
 
 If you deploy a commit that is missing files the human branch has, the deploy is
-refused, because promoting it would delete their turn from production with no
+refused, because promoting it would delete their work from production with no
 error at all.
 
 ## When you hit a wall
@@ -136,25 +136,47 @@ Include a conversation title on its own line, in your first response:
 You may include it again to update the title if the topic changes.
 `
 
-// maxInstructionBytes caps the app-specific instructions folded into the system
-// prompt.
+// maxInstructionBytes is a backstop on the app-specific instructions folded into
+// the system prompt.
 //
-// The prompt is passed as a single command-line argument, and Linux limits one
-// argument to MAX_ARG_STRLEN — 32 pages, 128 KiB — regardless of how much total
-// argv space is available. An app whose CLAUDE.md grew past that would not get a
-// truncated prompt, it would get E2BIG and no agent at all. 64 KiB leaves ample
-// room for the base prompt and is far larger than any instruction file that is
-// still useful to an agent.
-const maxInstructionBytes = 64 * 1024
+// Not an OS limit any more: the prompt travels in a file, so there is no argv
+// ceiling. This guards a self-inflicted lockout instead. The instruction file
+// lives in the agent's own worktree, so an agent that commits a pathologically
+// large CLAUDE.md would blow the context window on every subsequent turn —
+// including the turn you would use to undo it. Truncating keeps the agent
+// reachable.
+//
+// warnInstructionBytes is the softer signal: well below any hard limit, but
+// large enough that the operator should know they are spending that much of
+// every turn's context on instructions.
+const (
+	warnInstructionBytes = 32 * 1024
+	maxInstructionBytes  = 256 * 1024
+)
+
+// systemPromptPath is where the assembled prompt is written for the CLI to read.
+//
+// It lives in the data directory, not the worktree, which puts it behind the
+// same deny rules as the tool policy: the agent's file tools cannot rewrite its
+// own instructions.
+func (a *Service) systemPromptPath() string {
+	return filepath.Join(a.dataDir, "agent-system-prompt.md")
+}
+
+// writeSystemPrompt assembles the prompt and writes it out, returning the path.
+//
+// Regenerated every turn, both so an edited CLAUDE.md takes effect without a
+// restart and so anything that tampered with the file is corrected.
+func (a *Service) writeSystemPrompt() (string, error) {
+	path := a.systemPromptPath()
+	if err := os.WriteFile(path, []byte(a.buildSystemPrompt()), 0644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
 
 // buildSystemPrompt assembles slot-machine's own context plus the app's
 // instruction file.
-//
-// Note for operators: this ends up in the agent process's argv, so it is visible
-// in `ps` to any local user. That is not a new exposure — the agent already
-// receives the app's environment, secrets included — but it is worth knowing
-// before putting anything in CLAUDE.md that you would not put in a process
-// listing.
 func (a *Service) buildSystemPrompt() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, systemPromptBase,
@@ -169,10 +191,13 @@ func (a *Service) buildSystemPrompt() string {
 		}
 
 		if len(data) > maxInstructionBytes {
-			log.Printf("agent: %s is %d bytes; using the first %d and ignoring the rest "+
-				"(the system prompt is one command-line argument and cannot exceed the OS limit)",
+			log.Printf("agent: %s is %d bytes; using the first %d. An instruction file "+
+				"this large would exhaust the context window on every turn.",
 				name, len(data), maxInstructionBytes)
 			data = data[:maxInstructionBytes]
+		} else if len(data) > warnInstructionBytes {
+			log.Printf("agent: %s is %d bytes, and is prepended to every turn. "+
+				"Consider trimming it.", name, len(data))
 		}
 
 		b.WriteString("\n## App-specific instructions\n\n")

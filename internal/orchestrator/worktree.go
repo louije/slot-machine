@@ -296,28 +296,40 @@ func (o *Orchestrator) removeWorktree(dir string) {
 	}
 }
 
-// warnTrackedSharedDirs checks the shared_dirs configuration against git.
+// WarnSharedDirs checks the shared_dirs configuration against git.
 //
-// A shared dir is replaced by a symlink in every slot. If the same path is also
-// tracked in the repository, the two mechanisms fight: a deploy's
-// `git checkout --force` wants real files there, and applySharedDirs wants a
-// symlink. The result depends on ordering, which is the worst kind of bug to
-// diagnose. Nothing here can safely fix it — dropping tracked files or ignoring
-// the config would both lose data — so say so clearly at startup instead.
-func (o *Orchestrator) WarnTrackedSharedDirs() {
+// A shared dir is replaced by a symlink in every slot, the agent's worktree
+// included. Two ways that goes wrong, both silent:
+//
+//   - Tracked in git: the symlink and the checkout fight over the same path, and
+//     which one wins depends on ordering.
+//   - Neither tracked nor ignored: it shows up as an untracked entry in the
+//     agent's worktree, so an agent running `git add -A` commits a symlink
+//     pointing at an absolute path on this particular machine.
+//
+// Nothing here can safely fix either one — deleting tracked files or editing the
+// app's .gitignore would both be overreach — so say so clearly at startup.
+func (o *Orchestrator) WarnSharedDirs() {
 	for _, name := range o.cfg.SharedDirs {
 		name = filepath.Clean(name)
 		if name == "." || name == ".." || filepath.IsAbs(name) {
 			continue
 		}
-		out, err := git(o.repoDir, "ls-files", "--", name)
-		if err != nil || strings.TrimSpace(out) == "" {
+
+		if out, err := git(o.repoDir, "ls-files", "--", name); err == nil && strings.TrimSpace(out) != "" {
+			log.Printf("warning: shared_dir %q has %d file(s) tracked in git. "+
+				"Shared dirs are replaced by symlinks in every slot, so a tracked path "+
+				"will fight the checkout. Add %s to .gitignore and `git rm -r --cached %s`.",
+				name, len(splitLines(out)), name, name)
 			continue
 		}
-		n := len(splitLines(out))
-		log.Printf("warning: shared_dir %q has %d file(s) tracked in git. "+
-			"Shared dirs are replaced by symlinks in every slot, so a tracked path "+
-			"will fight the checkout. Add %s to .gitignore and `git rm -r --cached %s`.",
-			name, n, name, name)
+
+		// check-ignore exits non-zero when the path is not ignored.
+		if !gitOK(o.repoDir, "check-ignore", "-q", "--", name) {
+			log.Printf("warning: shared_dir %q is not in .gitignore. It appears as an "+
+				"untracked symlink in the agent's worktree, so an agent running "+
+				"`git add -A` would commit a path specific to this machine. "+
+				"Add %s to .gitignore.", name, name)
+		}
 	}
 }

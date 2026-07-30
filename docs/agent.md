@@ -62,7 +62,9 @@ A session is a Claude Code CLI process managed by slot-machine. The lifecycle:
 2. slot-machine enqueues work     agentManager spawns claude in background
 3. Agent runs as background       claude --output-format stream-json --verbose
    goroutine                              --model <model>
-                                          --append-system-prompt <context>
+                                          --settings <data>/agent-settings.json
+                                          --append-system-prompt-file
+                                              <data>/agent-system-prompt.md
                                           --resume <session_id>   (verified on disk)
                                           -p -- "message"
 4. Events stored in SQLite        Each event gets a row ID
@@ -474,6 +476,13 @@ Optional agent-specific fields (with sensible defaults):
 Instruction files are discovered rather than configured: the first of
 `AGENTS.slot-machine.md`, `AGENTS.md`, `CLAUDE.md` found in the machine slot is
 appended to the system prompt.
+
+The assembled prompt is written to `<data>/agent-system-prompt.md` and passed by
+path, not inline. Two reasons: argv is world-readable via `ps`, and a single
+argument is capped by the OS — a large enough instruction file did not truncate,
+it failed the exec outright. Living in the data directory also means the deny
+rules cover it, so the agent cannot edit its own instructions with its file
+tools.
 
 If these fields aren't in the config, the agent works anyway. Zero-config by
 default, tunable when needed.

@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // ResolveClaude finds the claude binary. Search order:
@@ -59,4 +62,26 @@ func InstallClaude(dataDir string) (string, error) {
 
 	fmt.Printf("claude installed at %s\n", bin)
 	return bin, nil
+}
+
+// CLIVersion reports the version string of the agent binary, for the startup
+// banner.
+//
+// Worth printing because slot-machine's invocation depends on flags whose
+// availability varies by version — the system prompt travels via
+// --append-system-prompt-file, and a CLI that did not support it would silently
+// run the agent with no context at all. Recording the version in the log makes
+// that answerable after the fact instead of guessable.
+func CLIVersion(bin string) string {
+	if bin == "" {
+		bin = "claude"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, bin, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

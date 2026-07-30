@@ -23,18 +23,18 @@ import (
 // The manager builds the argv rather than the caller, so that session resolution
 // can decide between --resume and a fresh session without the caller's help.
 type turn struct {
-	convID       string
-	prompt       string
-	sessionID    string
-	bin          string
-	dir          string
-	env          []string
-	allowedTools []string
-	settingsPath string
-	model        string
-	systemPrompt string
-	timeout      time.Duration
-	attempt      int
+	convID           string
+	prompt           string
+	sessionID        string
+	bin              string
+	dir              string
+	env              []string
+	allowedTools     []string
+	settingsPath     string
+	model            string
+	systemPromptPath string
+	timeout          time.Duration
+	attempt          int
 }
 
 type runningAgent struct {
@@ -314,7 +314,13 @@ func buildAgentArgs(t turn, resume bool) []string {
 	// Append rather than replace: --system-prompt discards the CLI's own tool
 	// guidance, which is not ours to throw away. We are adding context, not
 	// substituting for it.
-	args = append(args, "--append-system-prompt", t.systemPrompt)
+	//
+	// By file rather than inline. Inline, the whole prompt — including the app's
+	// CLAUDE.md — sat in the process's argv, readable via ps by any local user
+	// and bounded by the OS limit on a single argument.
+	if t.systemPromptPath != "" {
+		args = append(args, "--append-system-prompt-file", t.systemPromptPath)
+	}
 
 	if resume {
 		args = append(args, "--resume", t.sessionID)

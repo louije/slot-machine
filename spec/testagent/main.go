@@ -40,6 +40,8 @@ func main() {
 	_ = flag.String("model", "", "model")
 	_ = flag.String("system-prompt", "", "system prompt (replaces the built-in)")
 	_ = flag.String("append-system-prompt", "", "system prompt (appended)")
+	_ = flag.String("append-system-prompt-file", "", "system prompt file (appended)")
+	_ = flag.String("system-prompt-file", "", "system prompt file (replaces the built-in)")
 	_ = flag.String("allowedTools", "", "allowed tools")
 	_ = flag.String("allowed-tools", "", "allowed tools (alt form)")
 	_ = flag.String("disallowedTools", "", "disallowed tools")

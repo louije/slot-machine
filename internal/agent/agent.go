@@ -211,7 +211,7 @@ func (a *Service) handleSendMessage(w http.ResponseWriter, r *http.Request, conv
 
 	// Refuse before storing, so a rejected message does not sit in the
 	// transcript looking like it was accepted.
-	turn := turn{
+	t := turn{
 		convID:       convID,
 		prompt:       msg.Content,
 		sessionID:    conv.SessionID,
@@ -221,7 +221,6 @@ func (a *Service) handleSendMessage(w http.ResponseWriter, r *http.Request, conv
 		allowedTools: a.allowedTools,
 		settingsPath: a.agentPolicyPath(),
 		model:        a.model,
-		systemPrompt: a.buildSystemPrompt(),
 		timeout:      a.timeout,
 	}
 
@@ -230,13 +229,22 @@ func (a *Service) handleSendMessage(w http.ResponseWriter, r *http.Request, conv
 		return
 	}
 
-	// Regenerated per turn: the agent shares this machine's filesystem, so a
+	// Both regenerated per turn: the agent shares this machine's filesystem, so a
 	// fresh copy each turn bounds any tampering to a single turn.
 	if err := a.writeAgentPolicy(); err != nil {
 		log.Printf("agent: writing tool policy: %v", err)
 	}
+	promptPath, err := a.writeSystemPrompt()
+	if err != nil {
+		// Without its context the agent does not know where it is, what branch
+		// it is on, or how to deploy. Refuse rather than run it blind.
+		log.Printf("agent: writing system prompt: %v", err)
+		http.Error(w, "cannot prepare the agent's context", 500)
+		return
+	}
+	t.systemPromptPath = promptPath
 
-	if err := a.manager.enqueue(turn); err != nil {
+	if err := a.manager.enqueue(t); err != nil {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}

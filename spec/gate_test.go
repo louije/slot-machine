@@ -8,6 +8,7 @@ package spec
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -425,4 +426,109 @@ func containsStr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// The chat is reachable when nothing works
+// ---------------------------------------------------------------------------
+//
+// The public port is bound by the daemon, not by an app process, so it answers
+// before anything has ever deployed successfully. This is the case that matters
+// most: an operator whose deploy is broken needs the agent to fix it, and the
+// listener used to appear only on a successful deploy — unreachable exactly when
+// it was needed.
+
+func TestChatReachableWithNoSuccessfulDeploy(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeGateContract(t, t.TempDir(), appPort, intPort, nil)
+
+	// Put the unhealthy commit at HEAD, so even the daemon's own startup deploy
+	// cannot succeed. This is the state an operator is actually in when they
+	// need the agent: nothing works.
+	gitIn(t, repo.Dir, "checkout", "--quiet", "main")
+	gitIn(t, repo.Dir, "reset", "--hard", "--quiet", repo.CommitBad)
+
+	startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
+
+	dr, _ := deploy(t, apiPort, repo.CommitBad)
+	if dr.Success {
+		t.Fatal("expected the bad commit to fail")
+	}
+
+	st := status(t, apiPort)
+	if st.LiveCommit != "" {
+		t.Fatalf("expected nothing live, got %s", st.LiveCommit)
+	}
+	if !st.ProxyListening {
+		t.Fatal("the public port must be bound even with nothing live")
+	}
+
+	// The chat UI is served.
+	code, body := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/chat", appPort))
+	if code != 200 {
+		t.Fatalf("GET /chat returned %d with nothing live; the agent must stay reachable", code)
+	}
+	if !containsStr(body, "/chat/config") {
+		t.Fatal("/chat did not serve the chat page")
+	}
+
+	// And the agent API works, so a conversation can actually be started.
+	code, _ = httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/agent/conversations", appPort))
+	if code != 200 {
+		t.Fatalf("GET /agent/conversations returned %d with nothing live", code)
+	}
+
+	// App paths, by contrast, say plainly that there is no live slot.
+	code, _ = httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/", appPort))
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("app path returned %d, want 503 when nothing is live", code)
+	}
+}
+
+// The API port must be reserved before any deploy allocates its slot ports.
+//
+// Slot ports come from the ephemeral range. While the API port was still
+// unbound, a slot's app process could be handed it — and then `POST /deploy`
+// reached the app instead of the daemon, whose reply decoded into an all-zero
+// response: success=false with no stage and no error. It surfaced as an
+// occasional inexplicable "deploy failed".
+func TestAPIPortNotStolenByAppSlots(t *testing.T) {
+	t.Parallel()
+	bin := orchestratorBinary(t)
+	appBin := testappBinary(t)
+
+	ports, release := reservePorts(t, 3)
+	apiPort, appPort, intPort := ports[0], ports[1], ports[2]
+
+	repo := setupTestRepo(t, appBin, appPort, intPort)
+	contract := writeGateContract(t, t.TempDir(), appPort, intPort, nil)
+
+	startOrchestrator(t, bin, contract, repo.Dir, apiPort, release)
+
+	// Several deploys, each allocating a fresh pair of dynamic ports.
+	for _, c := range []string{repo.CommitA, repo.CommitB, repo.CommitC} {
+		mustDeploy(t, apiPort, c)
+	}
+
+	// The API port must still be the daemon's, answering the daemon's contract.
+	code, body := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/", apiPort))
+	if code != 200 {
+		t.Fatalf("API port returned %d", code)
+	}
+	if !containsStr(body, `"status":"ok"`) {
+		t.Fatalf("something other than the daemon is on the API port: %q", body)
+	}
+
+	// And a deploy response must be a deploy response, not another server's 200.
+	dr, _ := deploy(t, apiPort, repo.CommitA)
+	if !dr.Success && dr.Stage == "" && dr.Error == "" {
+		t.Fatal("got an all-zero deploy response: the request did not reach the daemon")
+	}
 }

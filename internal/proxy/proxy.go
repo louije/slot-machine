@@ -61,26 +61,54 @@ func New(addr string, intercept http.Handler) *Dynamic {
 	return p
 }
 
+// Start binds the public address and begins serving, whether or not there is a
+// live target yet.
+//
+// Binding early is what makes the daemon useful when nothing works. The listener
+// used to appear only on a successful deploy, which meant that an app whose very
+// first deploy failed had no reachable chat — exactly the moment an operator most
+// wants the agent, and it was unreachable by construction. With the port bound
+// from the start, /chat and /agent/* answer immediately and app paths return 503
+// until something is live.
+//
+// Idempotent, and safe to call before any deploy.
+func (p *Dynamic) Start() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.startLocked()
+}
+
+func (p *Dynamic) startLocked() error {
+	if p.addr == "" || p.srv != nil {
+		return nil
+	}
+	ln, err := p.listen()
+	if err != nil {
+		// Recorded rather than swallowed: this used to return silently, leaving
+		// the daemon reporting itself healthy with nothing listening and no way
+		// to find out why.
+		p.listenErr = err
+		log.Printf("proxy: cannot listen on %s: %v", p.addr, err)
+		return err
+	}
+	p.listenErr = nil
+	p.srv = &http.Server{Handler: http.HandlerFunc(p.ServeHTTP)}
+	go p.srv.Serve(ln)
+	return nil
+}
+
+// SetTarget points the proxy at a backend port. Zero means "nothing is live",
+// which serveHTTP answers with 503.
 func (p *Dynamic) SetTarget(port int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.port = port
-	if port <= 0 || p.srv != nil || p.addr == "" {
-		return
+	if port > 0 {
+		// Belt and braces: if Start was never called, or failed at boot because
+		// the previous daemon still held the port, a successful deploy is a
+		// perfectly good moment to try again.
+		p.startLocked()
 	}
-
-	ln, err := p.listen()
-	if err != nil {
-		// Silently returning here left the daemon reporting itself healthy with
-		// nothing listening on the public port, and no way to find out why.
-		p.listenErr = err
-		log.Printf("proxy: cannot listen on %s: %v", p.addr, err)
-		return
-	}
-	p.listenErr = nil
-
-	p.srv = &http.Server{Handler: http.HandlerFunc(p.ServeHTTP)}
-	go p.srv.Serve(ln)
 }
 
 func (p *Dynamic) listen() (net.Listener, error) {

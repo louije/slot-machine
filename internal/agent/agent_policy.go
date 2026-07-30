@@ -38,7 +38,7 @@ import (
 // deploying a web app, written as they would actually be typed.
 //
 // Kept deliberately short. A long list of near-misses reads as protection
-// without being any, and every entry that fires on legitimate turn is an entry
+// without being any, and every entry that fires on legitimate work is an entry
 // that teaches the agent to find another way around.
 var deniedCommands = []string{
 	// Destroying the machine or someone else's data.

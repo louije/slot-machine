@@ -24,6 +24,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -134,6 +135,22 @@ func cmdStart(args []string) {
 		os.Exit(1)
 	}
 
+	// Bind the API port before anything else, and serve on it last.
+	//
+	// Binding early is not cosmetic. Deploys allocate their slot ports from the
+	// ephemeral range, and until this listener exists the API port is simply
+	// unclaimed — so a slot's app process could be handed it, and then the daemon
+	// could not bind its own API at all. Reserving it up front closes that window
+	// while still letting startup finish before any request is served, so a
+	// reachable API continues to mean "startup is done".
+	apiAddr := fmt.Sprintf(":%d", apiPort)
+	apiLn, err := net.Listen("tcp", apiAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot listen on %s: %v\n", apiAddr, err)
+		fmt.Fprintln(os.Stderr, "another slot-machine may already be running here")
+		os.Exit(1)
+	}
+
 	// The HMAC secret is generated per daemon session and handed to app
 	// processes, never to the agent. See docs/agent.md on why this is identity
 	// labelling rather than authentication.
@@ -176,7 +193,11 @@ func cmdStart(args []string) {
 		}
 	}
 	if agentBin != "" {
-		fmt.Printf("agent binary: %s\n", agentBin)
+		if v := agent.CLIVersion(agentBin); v != "" {
+			fmt.Printf("agent binary: %s (%s)\n", agentBin, v)
+		} else {
+			fmt.Printf("agent binary: %s\n", agentBin)
+		}
 	}
 
 	svc := agent.NewService(agent.Options{
@@ -219,7 +240,7 @@ func cmdStart(args []string) {
 		Intercept:  svc,
 	})
 
-	o.WarnTrackedSharedDirs()
+	o.WarnSharedDirs()
 
 	// The agent's worktree. Created once and never rewritten by the daemon, so
 	// it survives deploys and restarts with its dependencies and any
@@ -230,6 +251,10 @@ func cmdStart(args []string) {
 	} else {
 		fmt.Printf("machine slot: %s (branch %s)\n", o.MachineDir(), cfg.MachineBranch)
 	}
+
+	// Bind the public port before deploying anything, so /chat is reachable even
+	// if every deploy below fails.
+	o.StartProxies()
 
 	// Recover state from symlinks, or auto-deploy HEAD.
 	o.RecoverState()
@@ -248,8 +273,7 @@ func cmdStart(args []string) {
 		}
 	}
 
-	apiAddr := fmt.Sprintf(":%d", apiPort)
-	apiSrv := &http.Server{Addr: apiAddr, Handler: o}
+	apiSrv := &http.Server{Handler: o}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -263,8 +287,8 @@ func cmdStart(args []string) {
 	}()
 
 	fmt.Printf("slot-machine listening on %s\n", apiAddr)
-	if err := apiSrv.ListenAndServe(); err != http.ErrServerClosed {
-		fmt.Fprintf(os.Stderr, "listen: %v\n", err)
+	if err := apiSrv.Serve(apiLn); err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
 		os.Exit(1)
 	}
 }

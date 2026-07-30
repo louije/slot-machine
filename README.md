@@ -42,6 +42,14 @@ refused connection. The distinction matters: a refused connection looks the same
 as a machine that has gone away, and letting go of the port invites something
 else to take it while the app is down.
 
+The port belongs to the daemon, not to any app process, so it is bound from
+startup. `/chat` and `/agent/*` therefore work **before anything has deployed
+successfully** — which is exactly when you want the agent, since a broken deploy
+is the thing you need it to fix. App paths return 503 until something is live.
+
+The daemon finishes its startup deploy before it accepts requests on the API
+port, so if `slot-machine status` answers, startup is done.
+
 ## What a deploy checks
 
 Every deploy — from the agent or from your terminal — runs the same pipeline,
@@ -279,9 +287,15 @@ determined one — `python -c`, `sed`, and a dozen other allowed tools each gran
 arbitrary effects, and no JSON file changes that. If you need a real boundary,
 run the agent under its own uid or in a container; see `docs/design.md` §11.
 
-The policy file deliberately lives in the data directory rather than in the
-agent's worktree. In the worktree it was an untracked file that `git add -A`
-would commit into your app's repository, absolute server paths and all.
+The policy file, and the assembled system prompt, deliberately live in the data
+directory rather than in the agent's worktree — which also puts them behind the
+deny rules above, so the agent's file tools cannot rewrite its own instructions.
+In the worktree they were untracked files that `git add -A` would commit into
+your app's repository, absolute server paths and all.
+
+The prompt is passed with `--append-system-prompt-file`. Inline, the whole thing
+— including your `CLAUDE.md` — sat in the agent process's argv, readable by any
+local user via `ps` and bounded by the OS limit on a single argument.
 
 ### Claude binary
 
